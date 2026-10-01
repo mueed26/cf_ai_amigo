@@ -6,19 +6,22 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
 
-  // Workers AI — Llama 3.3 plans agents, runs them, and powers chat.
+  // Workers AI: Llama 3.3 plans, runs and chats with agents.
   "ai": { "binding": "AI", "remote": true },
 
-  // React UI served as static assets; agent traffic hits the Worker first.
+  // Browser Run: Cloudflare's headless Chrome, for JavaScript-heavy pages.
+  "browser": { "binding": "BROWSER", "remote": true },
+
+  // The React app. Agent, login and API routes go to the server first.
   "assets": {
     "directory": "./public",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    "run_worker_first": ["/agents/*", "/oauth/*", "/api/*"]
   },
 
-  // Durable Objects (via the Agents SDK):
-  //   Workspace  — one per user workspace: agent registry + the Llama 3.3 planner.
-  //   AmigoAgent — one per created agent: config, chat, schedule, run history, memory (SQLite).
+  // Durable Objects:
+  // Workspace: one per user (agent list, planner, app logins).
+  // AmigoAgent: one per agent (settings, chat, schedule, runs, memory).
   "durable_objects": {
     "bindings": [
       { "class_name": "Workspace", "name": "Workspace" },
@@ -26,7 +29,7 @@
     ]
   },
 
-  // Workflows — durable, retried, multi-step execution of every agent run.
+  // Workflow that runs an agent step by step, with retries.
   "workflows": [
     {
       "name": "amigo-agent-run",

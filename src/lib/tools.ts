@@ -1,73 +1,96 @@
-/**
- * Runtime tools for Amigo agents. Everything runs inside the Worker using
- * `fetch` — no third-party API keys required.
- */
-import { tool, type ToolSet } from "ai";
+// Builds the list of tools an agent can use: web, memory, Hacker News and apps.
+import { jsonSchema, tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { Memory, ToolSlug } from "../shared";
+import { TOOL_CATALOG, type Memory, type ToolSlug } from "../shared";
+import { INTEGRATION_TOOLS } from "./integrations";
+import type { BrowserWorker } from "@cloudflare/puppeteer";
+import { renderPageText } from "./browser";
+import { hackerNewsTools } from "./hackernews";
+import { htmlToText } from "./text";
 
 const MAX_PAGE_CHARS = 8_000;
 const USER_AGENT =
-  "cf-ai-amigo/1.0 (+https://developers.cloudflare.com/agents/)";
+  "Mozilla/5.0 (compatible; cf-ai-amigo/1.0; +https://developers.cloudflare.com/agents/)";
 
-/** Sync inside the Durable Object, async (RPC) from inside a Workflow. */
+// Where the agent saves and reads memories.
 export type MemoryStore = {
   remember(content: string, source: Memory["source"]): Memory | Promise<Memory>;
   recall(): Memory[] | Promise<Memory[]>;
 };
 
-export function htmlToText(html: string) {
-  return html
-    .replace(/<(script|style|noscript|svg|head)[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n+/g, "\n\n")
-    .trim();
-}
+// What an agent needs from the Workspace to use app tools.
+export type WorkspaceTools = {
+  callTool(name: string, args: unknown): Promise<unknown>;
+  notionTools(): Promise<
+    { name: string; description: string; inputSchema: unknown }[]
+  >;
+};
 
-async function webSearch(query: string) {
-  const res = await fetch("https://html.duckduckgo.com/html/", {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      "user-agent": USER_AGENT
-    },
-    body: new URLSearchParams({ q: query }).toString()
-  });
-  if (!res.ok) throw new Error(`Search failed with HTTP ${res.status}`);
-  const html = await res.text();
+type SearchResult = { title: string; url: string; snippet: string };
 
-  const results: { title: string; url: string; snippet: string }[] = [];
-  const blocks = html.split(/class="result results_links/).slice(1);
-  for (const block of blocks) {
-    const link = block.match(
-      /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/
-    );
-    if (!link) continue;
-    const snippet = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
-    let url = link[1].replace(/&amp;/g, "&");
-    // DuckDuckGo wraps results in a redirect: //duckduckgo.com/l/?uddg=<encoded>
-    const uddg = url.match(/[?&]uddg=([^&]+)/);
+function parseDuckDuckGo(html: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  // Works with both DuckDuckGo page formats (html and lite).
+  const linkRe =
+    /<a[^>]+class=['"](?:result__a|result-link)['"][^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>|<a[^>]+href=['"]([^'"]+)['"][^>]*class=['"](?:result__a|result-link)['"][^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRe =
+    /class=['"](?:result__snippet|result-snippet)['"][^>]*>([\s\S]*?)<\/(?:a|td)>/g;
+  const snippets = [...html.matchAll(snippetRe)].map((m) => htmlToText(m[1]));
+  let i = 0;
+  for (const m of html.matchAll(linkRe)) {
+    let url = (m[1] ?? m[3]).replace(/&amp;/g, "&");
+    const uddg = url.match(/[?&]uddg=([^&]+)/); // DDG redirect wrapper
     if (uddg) url = decodeURIComponent(uddg[1]);
     if (url.startsWith("//")) url = `https:${url}`;
+    if (!url.startsWith("http") || url.includes("duckduckgo.com/y.js"))
+      continue; // skip ads
     results.push({
-      title: htmlToText(link[2]),
+      title: htmlToText(m[2] ?? m[4]),
       url,
-      snippet: snippet ? htmlToText(snippet[1]) : ""
+      snippet: snippets[i++] ?? ""
     });
     if (results.length >= 8) break;
   }
   return results;
 }
 
-async function webFetch(url: string) {
+export async function webSearch(query: string): Promise<SearchResult[]> {
+  const endpoints = [
+    "https://html.duckduckgo.com/html/",
+    "https://lite.duckduckgo.com/lite/"
+  ];
+  let lastError = "no results";
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "user-agent": USER_AGENT
+        },
+        body: new URLSearchParams({ q: query }).toString()
+      });
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+        continue;
+      }
+      const results = parseDuckDuckGo(await res.text());
+      if (results.length) return results;
+    } catch (e) {
+      lastError = String(e);
+    }
+  }
+  throw new Error(
+    `Search unavailable (${lastError}). Try web_fetch on a known site instead.`
+  );
+}
+
+// Less text than this usually means the page needs JavaScript.
+const MIN_STATIC_TEXT = 600;
+const BLOCKED_STATUSES = new Set([401, 403, 429, 503]);
+
+// Try a normal fetch first. If the page is empty or blocked, use Browser Run.
+export async function webFetch(url: string, browser?: BrowserWorker) {
   const parsed = new URL(url);
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error("Only http(s) URLs can be fetched.");
@@ -81,75 +104,75 @@ async function webFetch(url: string) {
   });
   const type = res.headers.get("content-type") ?? "";
   const body = await res.text();
-  const text = type.includes("html") ? htmlToText(body) : body;
-  return {
+  const isHtml = type.includes("html");
+  const text = isHtml ? htmlToText(body) : body;
+  const result = {
     url: res.url,
     status: res.status,
-    contentType: type,
+    renderedWith: "fetch" as "fetch" | "browser",
     content: text.slice(0, MAX_PAGE_CHARS),
-    truncated: text.length > MAX_PAGE_CHARS
+    truncated: text.length > MAX_PAGE_CHARS,
+    note: undefined as string | undefined
   };
+
+  const needsBrowser =
+    BLOCKED_STATUSES.has(res.status) ||
+    (isHtml && text.length < MIN_STATIC_TEXT);
+  if (!browser || !needsBrowser) return result;
+
+  try {
+    const page = await renderPageText(browser, parsed.toString());
+    if (page.text.trim().length > text.length) {
+      return {
+        ...result,
+        url: page.url,
+        status: 200,
+        renderedWith: "browser" as const,
+        content: `${page.title}
+
+${page.text}`.slice(0, MAX_PAGE_CHARS),
+        truncated: page.text.length > MAX_PAGE_CHARS
+      };
+    }
+  } catch (e) {
+    // Browser limit hit or page too slow; return what we have.
+    result.note = `Browser rendering unavailable: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  return result;
 }
 
-/** Build the tool set for one agent: its granted catalog tools + memory. */
-export function buildTools({
+// Give errors back to the AI instead of crashing, so it can try something else.
+async function safely(fn: () => Promise<unknown>) {
+  try {
+    return await fn();
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export function connectionFor(slug: ToolSlug) {
+  return TOOL_CATALOG.find((t) => t.slug === slug)?.connection ?? null;
+}
+
+export async function buildTools({
   granted,
   timezone,
   memory,
-  memorySource
+  memorySource,
+  workspace,
+  browser,
+  requireApproval
 }: {
   granted: ToolSlug[];
   timezone: string;
   memory: MemoryStore;
   memorySource: Memory["source"];
-}): ToolSet {
-  const all = {
-    web_search: tool({
-      description:
-        "Search the public web. Returns titles, URLs and snippets. Follow up with web_fetch to read a page.",
-      inputSchema: z.object({
-        query: z.string().min(2).describe("Search query")
-      }),
-      execute: async ({ query }) => {
-        try {
-          const results = await webSearch(query);
-          return results.length
-            ? results
-            : "No results found. Try a different query.";
-        } catch (e) {
-          return { error: String(e) };
-        }
-      }
-    }),
-    web_fetch: tool({
-      description:
-        "Fetch a public web page or JSON API and return its readable text.",
-      inputSchema: z.object({
-        url: z.string().url().describe("Absolute http(s) URL")
-      }),
-      execute: async ({ url }) => {
-        try {
-          return await webFetch(url);
-        } catch (e) {
-          return { error: String(e) };
-        }
-      }
-    }),
-    current_time: tool({
-      description: "Get the current date and time in the user's timezone.",
-      inputSchema: z.object({}),
-      execute: async () => ({
-        timezone,
-        localTime: new Date().toLocaleString("en-US", {
-          timeZone: timezone,
-          dateStyle: "full",
-          timeStyle: "long"
-        }),
-        iso: new Date().toISOString()
-      })
-    })
-  } satisfies Record<ToolSlug, unknown>;
-
+  workspace: WorkspaceTools | null;
+  // Cloudflare's browser, used for JavaScript-heavy pages.
+  browser?: BrowserWorker;
+  // True in chat: ask before sending or posting.
+  requireApproval: boolean;
+}): Promise<ToolSet> {
   const tools: ToolSet = {
     remember: tool({
       description:
@@ -163,6 +186,63 @@ export function buildTools({
       execute: async () => memory.recall()
     })
   };
-  for (const slug of granted) tools[slug] = all[slug];
+
+  for (const slug of granted) {
+    if (slug === "web_search") {
+      tools.web_search = tool({
+        description:
+          "Search the public web. Returns titles, URLs and snippets. Then use web_fetch to read the most relevant pages.",
+        inputSchema: z.object({
+          query: z.string().min(2).describe("Search query")
+        }),
+        execute: ({ query }) => safely(() => webSearch(query))
+      });
+      tools.web_fetch = tool({
+        description:
+          "Fetch a public web page or JSON API and return its readable text. JavaScript-heavy pages are automatically rendered in a real browser.",
+        inputSchema: z.object({
+          url: z.string().url().describe("Absolute http(s) URL")
+        }),
+        execute: ({ url }) => safely(() => webFetch(url, browser))
+      });
+    } else if (slug === "current_time") {
+      tools.current_time = tool({
+        description: "Get the current date and time in the user's timezone.",
+        inputSchema: z.object({}),
+        execute: async () => ({
+          timezone,
+          localTime: new Date().toLocaleString("en-US", {
+            timeZone: timezone,
+            dateStyle: "full",
+            timeStyle: "long"
+          })
+        })
+      });
+    } else if (slug === "hacker_news") {
+      Object.assign(tools, hackerNewsTools());
+    } else if (slug === "notion" && workspace) {
+      for (const spec of await workspace.notionTools().catch(() => [])) {
+        tools[spec.name] = tool({
+          description: spec.description,
+          inputSchema: jsonSchema(
+            spec.inputSchema as Parameters<typeof jsonSchema>[0]
+          ),
+          needsApproval:
+            requireApproval &&
+            /create|update|move|delete|duplicate/i.test(spec.name),
+          execute: (args) => safely(() => workspace.callTool(spec.name, args))
+        });
+      }
+    } else if (workspace) {
+      for (const t of INTEGRATION_TOOLS[slug] ?? []) {
+        tools[t.name] = tool({
+          description: t.description,
+          inputSchema: t.input,
+          needsApproval: requireApproval && !!t.sensitive,
+          execute: (args) => safely(() => workspace.callTool(t.name, args))
+        });
+      }
+    }
+  }
   return tools;
 }
