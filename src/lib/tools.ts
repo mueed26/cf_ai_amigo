@@ -34,7 +34,7 @@ export type WorkspaceTools = {
 
 type SearchResult = { title: string; url: string; snippet: string };
 
-function parseDuckDuckGo(html: string): SearchResult[] {
+export function parseDuckDuckGo(html: string): SearchResult[] {
   const results: SearchResult[] = [];
   // Works with both DuckDuckGo page formats (html and lite).
   const linkRe =
