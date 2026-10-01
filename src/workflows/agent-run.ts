@@ -18,6 +18,7 @@ import {
   type RunContext
 } from "../agents/amigo-agent";
 import { secrets } from "../lib/integrations/secrets";
+import { missingDestinations, requiredDestinations } from "../lib/delivery";
 import { log } from "../lib/log";
 import { buildTools } from "../lib/tools";
 import { MODEL, type ToolCallRecord } from "../shared";
@@ -85,32 +86,73 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
           .join("\n")}`
       : "";
 
-    const result = await generateText({
-      model: workersai(MODEL),
-      system: agentSystemPrompt({ ...ctx, mode: "run" }),
-      prompt: `Perform your objective now: ${ctx.config.objective}${previous}`,
-      tools: await buildTools({
-        granted: ctx.config.tools,
-        timezone: ctx.timezone,
-        memory: {
-          remember: (content, source) => this.agent.addMemory(content, source),
-          recall: () => ctx.memories
-        },
-        memorySource: "run",
-        workspace: workspaceTools(this.env, ctx.workspaceId),
-        browser: this.env.BROWSER as unknown as BrowserWorker,
-        // No one is watching scheduled runs, so don't wait for approval.
-        requireApproval: false,
-        trace: { runId, agent: ctx.config.name },
-        calls: toolCalls,
-        searchApiKey: secrets(this.env).TAVILY_API_KEY
-      }),
-      stopWhen: stepCountIs(10)
+    const model = workersai(MODEL);
+    const system = agentSystemPrompt({ ...ctx, mode: "run" });
+    const prompt = `Perform your objective now: ${ctx.config.objective}${previous}`;
+    const tools = await buildTools({
+      granted: ctx.config.tools,
+      timezone: ctx.timezone,
+      memory: {
+        remember: (content, source) => this.agent.addMemory(content, source),
+        recall: () => ctx.memories
+      },
+      memorySource: "run",
+      workspace: workspaceTools(this.env, ctx.workspaceId),
+      browser: this.env.BROWSER as unknown as BrowserWorker,
+      // No one is watching scheduled runs, so don't wait for approval.
+      requireApproval: false,
+      trace: { runId, agent: ctx.config.name },
+      calls: toolCalls,
+      searchApiKey: secrets(this.env).TAVILY_API_KEY
     });
 
-    const text = result.text.trim();
-    if (!text) throw new Error("The model returned an empty result.");
+    const result = await generateText({
+      model,
+      system,
+      prompt,
+      tools,
+      stopWhen: stepCountIs(10)
+    });
+    let text = result.text.trim();
 
+    // If the objective asked to save or send the result somewhere and the
+    // agent stopped before doing it, remind it once.
+    const required = requiredDestinations(
+      ctx.config.objective,
+      ctx.config.tools
+    );
+    let missing = missingDestinations(required, toolCalls);
+    if (missing.length) {
+      const names = missing.map((d) => d.name).join(" and ");
+      const retry = await generateText({
+        model,
+        system,
+        tools,
+        messages: [
+          { role: "user", content: prompt },
+          ...result.response.messages,
+          {
+            role: "user",
+            content: `You haven't finished yet: you still need to save or send the result to ${names}. Call the tool for that now, then reply with where it was saved and the link.`
+          }
+        ],
+        stopWhen: stepCountIs(4)
+      });
+      if (retry.text.trim())
+        text = text ? `${text}\n\n${retry.text.trim()}` : retry.text.trim();
+      missing = missingDestinations(required, toolCalls);
+    }
+    // Still not delivered: show it in the run's steps so it isn't "completed".
+    for (const d of missing) {
+      toolCalls.push({
+        tool: `${d.name} (not saved)`,
+        ok: false,
+        ms: 0,
+        error: `The agent didn't save the result to ${d.name}.`
+      });
+    }
+
+    if (!text) throw new Error("The model returned an empty result.");
     return { output: text, toolCalls };
   }
 

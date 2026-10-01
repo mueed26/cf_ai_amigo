@@ -181,7 +181,13 @@ export class Workspace extends Agent<Env, WorkspaceState> {
     if (!this.state.agents.some((a) => a.id === id))
       throw new Error("Unknown agent.");
     const agent = await getAgentByName(this.env.AmigoAgent, id);
-    await agent.teardown();
+    try {
+      await agent.teardown();
+    } catch (e) {
+      // The agent wipes itself at the end of teardown, which ends this call
+      // with a "destroyed" error. That means it worked.
+      if (!/destroy/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    }
     this.setState({
       ...this.state,
       agents: this.state.agents.filter((a) => a.id !== id)
