@@ -17,6 +17,7 @@ import {
   type AmigoAgent,
   type RunContext
 } from "../agents/amigo-agent";
+import { secrets } from "../lib/integrations/secrets";
 import { log } from "../lib/log";
 import { buildTools } from "../lib/tools";
 import { MODEL, type ToolCallRecord } from "../shared";
@@ -101,7 +102,8 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
         // No one is watching scheduled runs, so don't wait for approval.
         requireApproval: false,
         trace: { runId, agent: ctx.config.name },
-        calls: toolCalls
+        calls: toolCalls,
+        searchApiKey: secrets(this.env).TAVILY_API_KEY
       }),
       stopWhen: stepCountIs(10)
     });

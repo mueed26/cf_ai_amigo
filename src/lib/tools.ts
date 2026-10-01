@@ -32,7 +32,12 @@ export type WorkspaceTools = {
   >;
 };
 
-type SearchResult = { title: string; url: string; snippet: string };
+type SearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+  published?: string;
+};
 
 export function parseDuckDuckGo(html: string): SearchResult[] {
   const results: SearchResult[] = [];
@@ -60,13 +65,47 @@ export function parseDuckDuckGo(html: string): SearchResult[] {
   return results;
 }
 
-export async function webSearch(query: string): Promise<SearchResult[]> {
-  const endpoints = [
+type Recent = "day" | "week" | "month";
+
+// Tavily: a search API made for AI agents (free tier, no card).
+async function tavilySearch(query: string, apiKey: string, recent?: Recent) {
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      query,
+      max_results: 8,
+      topic: recent ? "news" : "general",
+      ...(recent ? { time_range: recent } : {})
+    })
+  });
+  if (!res.ok) throw new Error(`Tavily returned HTTP ${res.status}`);
+  const data = (await res.json()) as {
+    results?: {
+      title: string;
+      url: string;
+      content?: string;
+      published_date?: string;
+    }[];
+  };
+  return (data.results ?? []).map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: (r.content ?? "").slice(0, 300),
+    ...(r.published_date ? { published: r.published_date } : {})
+  }));
+}
+
+// DuckDuckGo's HTML pages. Works from most networks, but often blocks
+// requests from data centres (including Cloudflare's).
+async function duckDuckGoSearch(query: string) {
+  for (const endpoint of [
     "https://html.duckduckgo.com/html/",
     "https://lite.duckduckgo.com/lite/"
-  ];
-  let lastError = "no results";
-  for (const endpoint of endpoints) {
+  ]) {
     try {
       const res = await fetch(endpoint, {
         method: "POST",
@@ -76,18 +115,58 @@ export async function webSearch(query: string): Promise<SearchResult[]> {
         },
         body: new URLSearchParams({ q: query }).toString()
       });
-      if (!res.ok) {
-        lastError = `HTTP ${res.status}`;
-        continue;
-      }
+      if (!res.ok) continue;
       const results = parseDuckDuckGo(await res.text());
       if (results.length) return results;
-    } catch (e) {
-      lastError = String(e);
+    } catch {
+      // try the next endpoint
     }
   }
+  return [];
+}
+
+// Wikipedia's official search API: good for background on a topic, not for news.
+async function wikipediaSearch(query: string) {
+  const params = new URLSearchParams({
+    action: "query",
+    list: "search",
+    srsearch: query,
+    srlimit: "5",
+    format: "json"
+  });
+  const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
+    headers: { "user-agent": USER_AGENT }
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    query?: { search?: { title: string; snippet: string }[] };
+  };
+  return (data.query?.search ?? []).map((r) => ({
+    title: `${r.title} (Wikipedia)`,
+    url: `https://en.wikipedia.org/wiki/${encodeURIComponent(r.title.replace(/ /g, "_"))}`,
+    snippet: htmlToText(r.snippet)
+  }));
+}
+
+// Try each search source in turn and return the first one with results.
+export async function webSearch(
+  query: string,
+  options: { apiKey?: string; recent?: Recent } = {}
+): Promise<SearchResult[]> {
+  if (options.apiKey) {
+    try {
+      const results = await tavilySearch(query, options.apiKey, options.recent);
+      if (results.length) return results;
+    } catch {
+      // fall back to the free sources below
+    }
+  }
+  const ddg = await duckDuckGoSearch(query);
+  if (ddg.length) return ddg;
+  const wiki = await wikipediaSearch(query);
+  if (wiki.length) return wiki;
   throw new Error(
-    `Search unavailable (${lastError}). Try web_fetch on a known site instead.`
+    "Web search is unavailable right now. Use hacker_news for tech news, or web_fetch on a known site (e.g. blog.cloudflare.com)."
   );
 }
 
@@ -169,7 +248,8 @@ export async function buildTools({
   browser,
   requireApproval,
   trace,
-  calls
+  calls,
+  searchApiKey
 }: {
   granted: ToolSlug[];
   timezone: string;
@@ -184,6 +264,8 @@ export async function buildTools({
   trace?: Record<string, string>;
   // If given, every tool call is recorded here (used for the run's steps).
   calls?: ToolCallRecord[];
+  // Optional Tavily key for reliable web search.
+  searchApiKey?: string;
 }): Promise<ToolSet> {
   const tools: ToolSet = {
     remember: tool({
@@ -203,11 +285,16 @@ export async function buildTools({
     if (slug === "web_search") {
       tools.web_search = tool({
         description:
-          "Search the public web. Returns titles, URLs and snippets. Then use web_fetch to read the most relevant pages.",
+          "Search the public web. Returns titles, URLs and snippets. Set recent for news (e.g. 'week' for this week). Then use web_fetch to read the most relevant pages.",
         inputSchema: z.object({
-          query: z.string().min(2).describe("Search query")
+          query: z.string().min(2).describe("Search query"),
+          recent: z
+            .enum(["day", "week", "month"])
+            .optional()
+            .describe("Only recent news from this period")
         }),
-        execute: ({ query }) => safely(() => webSearch(query))
+        execute: ({ query, recent }) =>
+          safely(() => webSearch(query, { apiKey: searchApiKey, recent }))
       });
       tools.web_fetch = tool({
         description:

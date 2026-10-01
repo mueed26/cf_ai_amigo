@@ -11,6 +11,7 @@ import {
 import type { BrowserWorker } from "@cloudflare/puppeteer";
 import { createWorkersAI } from "workers-ai-provider";
 import { cleanAi } from "../lib/ai";
+import { secrets } from "../lib/integrations/secrets";
 import { log } from "../lib/log";
 import { localCronToUtc, localDateTimeToUtc } from "../lib/schedule";
 import {
@@ -261,7 +262,8 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
         browser: this.env.BROWSER as unknown as BrowserWorker,
         // In chat, ask the user before sending emails or posting to Slack.
         requireApproval: true,
-        trace: { agentId: this.name, mode: "chat" }
+        trace: { agentId: this.name, mode: "chat" },
+        searchApiKey: secrets(this.env).TAVILY_API_KEY
       }),
       stopWhen: stepCountIs(8),
       abortSignal: options?.abortSignal

@@ -439,13 +439,17 @@ export class Workspace extends Agent<Env, WorkspaceState> {
     const result = await this.mcp.callTool({
       serverId: server.id,
       name: mcpTool.name,
-      arguments: (args ?? {}) as Record<string, unknown>
+      // The model often sends emoji icons Notion rejects; pages don't need them.
+      arguments: withoutIcons(args ?? {}) as Record<string, unknown>
     });
     const content = (result.content ?? []) as { type: string; text?: string }[];
-    return content
+    const text = content
       .map((c) => (c.type === "text" ? c.text : `[${c.type}]`))
       .join("\n")
       .slice(0, 12_000);
+    // Notion reports failures as text, so turn them into real errors.
+    if (result.isError) throw new Error(text || "Notion returned an error.");
+    return text;
   }
 
   // Internal helpers
@@ -575,6 +579,19 @@ function googlePermissionWarning(row: TokenRow | undefined) {
   );
   if (missing.length === 0) return null;
   return `Missing permission: ${missing.map((s) => GOOGLE_PERMISSION_NAMES[s]).join(", ")}. Disconnect, connect again and tick every box on Google's screen.`;
+}
+
+// Remove "icon" and "cover" fields anywhere in a Notion tool's arguments.
+function withoutIcons(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutIcons);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "icon" && key !== "cover")
+        .map(([key, v]) => [key, withoutIcons(v)])
+    );
+  }
+  return value;
 }
 
 async function googleTokenRequest(body: Record<string, string>) {

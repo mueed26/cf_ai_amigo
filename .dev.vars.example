@@ -23,5 +23,8 @@ GOOGLE_CLIENT_SECRET=
 SLACK_CLIENT_ID=
 SLACK_CLIENT_SECRET=
 
+# Optional: reliable web search (free key, no card) from https://tavily.com
+TAVILY_API_KEY=
+
 # Notion needs no env vars: connect it from the Integrations page.
 # Web search and Hacker News need no keys at all.

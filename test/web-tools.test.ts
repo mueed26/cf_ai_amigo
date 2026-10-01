@@ -1,6 +1,6 @@
 // Web search parsing, HTML cleanup and the Hacker News tools.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseDuckDuckGo } from "@/lib/tools";
+import { parseDuckDuckGo, webSearch } from "@/lib/tools";
 import { htmlToText } from "@/lib/text";
 import { hackerNewsTools } from "@/lib/hackernews";
 
@@ -142,5 +142,78 @@ describe("Hacker News tools", () => {
         options
       )
     ).rejects.toThrow("HTTP 503");
+  });
+});
+
+describe("webSearch", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses Tavily news search when a key is set", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        Response.json({
+          results: [
+            {
+              title: "Workers AI news",
+              url: "https://blog.cloudflare.com/x",
+              content: "New models.",
+              published_date: "2026-09-30"
+            }
+          ]
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const results = await webSearch("cloudflare workers ai", {
+      apiKey: "tvly-test",
+      recent: "week"
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://api.tavily.com/search"
+    );
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toMatchObject({ topic: "news", time_range: "week" });
+    expect(results).toEqual([
+      {
+        title: "Workers AI news",
+        url: "https://blog.cloudflare.com/x",
+        snippet: "New models.",
+        published: "2026-09-30"
+      }
+    ]);
+  });
+
+  it("falls back to Wikipedia when DuckDuckGo is blocked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) =>
+        String(url).includes("wikipedia.org")
+          ? Response.json({
+              query: {
+                search: [
+                  { title: "Cloudflare", snippet: "A <b>web</b> company" }
+                ]
+              }
+            })
+          : new Response("blocked", { status: 403 })
+      )
+    );
+
+    expect(await webSearch("cloudflare")).toEqual([
+      {
+        title: "Cloudflare (Wikipedia)",
+        url: "https://en.wikipedia.org/wiki/Cloudflare",
+        snippet: "A web company"
+      }
+    ]);
+  });
+
+  it("explains what to do when every source fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("down", { status: 503 }))
+    );
+    await expect(webSearch("anything")).rejects.toThrow("hacker_news");
   });
 });

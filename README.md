@@ -25,7 +25,9 @@ Web search, Hacker News, memory, scheduling and chat work without connecting any
 >
 > Unverified apps are limited by Google to 100 users. Access is only used to run tasks you set up (see the [privacy policy](https://cf-ai-amigo.mirmueed000.workers.dev/privacy)), and you can revoke it any time from your [Google account](https://myaccount.google.com/permissions).
 
-> **Free plan limits:** the demo runs on Cloudflare's free plan (about 10,000 Workers AI neurons a day, roughly 8–10 agent runs shared by all users). If agents stop responding, the daily allowance has run out; it resets every day.
+> **🙏 Please keep testing light: this demo runs on Cloudflare's free plan.**
+>
+> Llama 3.3 on Workers AI has a free allowance of about 10,000 neurons a day, which is roughly **8–10 agent runs shared by everyone** using the demo, plus a few Browser Run minutes. One or two agent runs and a short chat are enough to see everything. If agents stop responding, the daily allowance has run out; it resets every day (00:00 UTC).
 
 > _"Every weekday at 9am, give me the top 5 Hacker News stories about AI with a one-line summary each."_
 >
@@ -46,14 +48,14 @@ This is the Cloudflare-native edition of [AMIGO AI](https://github.com/mueed26/A
 
 Agents can act on real apps. There is no third-party integration platform: each connector is built directly on Workers + Durable Objects, and Notion uses the Agents SDK's own MCP client.
 
-| Tool            | How it connects                                                                                                                                                              | Setup                                     |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| **Web search**  | DuckDuckGo results + page fetch from the Worker; JavaScript-heavy or bot-blocked pages fall back to **Cloudflare Browser Run** (headless Chrome via `@cloudflare/puppeteer`) | None (Browser Run: 10 free min/day)       |
-| **Gmail**       | Google OAuth 2.0 (own flow in the Worker); tokens + refresh in the Workspace DO                                                                                              | Google Cloud OAuth client (free)          |
-| **Google Docs** | Same Google connection                                                                                                                                                       | (same)                                    |
-| **Notion**      | **Notion's official remote MCP server** via `this.addMcpServer()`; the SDK handles OAuth + persistence                                                                       | None — click Connect                      |
-| **Slack**       | "Add to Slack" OAuth 2.0 (same flow as Google, in the Worker); bot token stored in the Workspace DO. Pasting a bot token still works as a fallback                           | Slack app with public distribution (free) |
-| **Hacker News** | Official Algolia HN Search API, called from the Worker                                                                                                                       | None                                      |
+| Tool            | How it connects                                                                                                                                                                                                                                                                                                                                         | Setup                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| **Web search**  | [Tavily](https://tavily.com) search API when `TAVILY_API_KEY` is set (free tier, built for AI agents, supports "news from the past week"); otherwise DuckDuckGo, then Wikipedia's official API. Pages are read from the Worker, with **Cloudflare Browser Run** (headless Chrome via `@cloudflare/puppeteer`) for JavaScript-heavy or bot-blocked pages | Optional free Tavily key                  |
+| **Gmail**       | Google OAuth 2.0 (own flow in the Worker); tokens + refresh in the Workspace DO                                                                                                                                                                                                                                                                         | Google Cloud OAuth client (free)          |
+| **Google Docs** | Same Google connection                                                                                                                                                                                                                                                                                                                                  | (same)                                    |
+| **Notion**      | **Notion's official remote MCP server** via `this.addMcpServer()`; the SDK handles OAuth + persistence                                                                                                                                                                                                                                                  | None — click Connect                      |
+| **Slack**       | "Add to Slack" OAuth 2.0 (same flow as Google, in the Worker); bot token stored in the Workspace DO. Pasting a bot token still works as a fallback                                                                                                                                                                                                      | Slack app with public distribution (free) |
+| **Hacker News** | Official Algolia HN Search API, called from the Worker                                                                                                                                                                                                                                                                                                  | None                                      |
 
 **Credentials never leave the Workspace Durable Object.** Agents and Workflows only see tool names and schemas; when the model calls a tool, the call is made over DO RPC to the Workspace, which attaches the token, calls the API, and returns the result. The synced UI state only contains connection status.
 
@@ -138,6 +140,7 @@ npm run dev
 Open the URL Vite prints (usually http://localhost:5173). Web search, memory and Notion work immediately. For the other integrations, copy `.dev.vars.example` to `.dev.vars`, fill in what you want, and restart `npm run dev`:
 
 - **Google (Gmail + Docs):** [Google Cloud Console](https://console.cloud.google.com/) → new project → enable **Gmail API** and **Google Docs API** → OAuth consent screen (External, add yourself as a test user) → Credentials → OAuth client ID (Web application) with redirect URI `http://localhost:5173/oauth/google/callback`.
+- **Web search (optional):** get a free key at [tavily.com](https://tavily.com) (no card) and set `TAVILY_API_KEY`. Without it, search falls back to DuckDuckGo and Wikipedia.
 - **Slack:** create an app at [api.slack.com/apps](https://api.slack.com/apps) with the bot scopes `chat:write`, `chat:write.public`, `channels:read`, `channels:history`, `channels:join`. For one-click **Connect**, add `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` (Basic Information) to `.dev.vars`, add the redirect URL `https://localhost:5173/oauth/slack/callback`, and turn on **Manage Distribution → Public Distribution**. Slack only allows its login over https, so run `npm run dev:https` (a self-signed certificate; click through the browser warning) instead of `npm run dev`. Without these, paste the app's bot token on the Integrations page instead.
 
 When connecting Google, tick **every** permission box on Google's screen. The Integrations page warns you if a permission is missing.
@@ -168,6 +171,7 @@ npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put SLACK_CLIENT_ID
 npx wrangler secret put SLACK_CLIENT_SECRET
+npx wrangler secret put TAVILY_API_KEY
 ```
 
 Also add `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/google/callback` as a redirect URI on your Google OAuth client, and `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/slack/callback` as a redirect URL on your Slack app.
@@ -188,7 +192,7 @@ Runs are traced with structured JSON logs (`run_start`, `tool_call`, `run_finish
 ## Security notes and limitations
 
 - Clerk session tokens are passed in the WebSocket URL (browsers cannot set WebSocket headers). They are short-lived (~60s) and only used for the handshake.
-- `web_search` uses DuckDuckGo's HTML endpoint and is best-effort; an AI Search binding would be the production choice. Browser Run is only used when a plain fetch returns too little text, to stay within the free 10 browser-minutes/day.
+- Without a Tavily key, `web_search` relies on DuckDuckGo's HTML pages, which often block requests from data centres (including Cloudflare), and then falls back to Wikipedia (good for background, not news). Bing and Google News RSS feeds were deliberately not used, because their terms only allow personal use in feed readers.
 - Google Docs uses the `drive.file` scope, so agents can read docs they created (or ones explicitly shared with the app), not your whole Drive. That's a deliberate least-privilege choice.
 - Tokens sit in Durable Object storage, which Cloudflare encrypts at rest. Application-level encryption with a key in a Worker secret would be the next hardening step.
 - Cron conversion uses the current UTC offset, so after a DST change, re-save a schedule (pause and resume).
