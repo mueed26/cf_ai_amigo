@@ -1,12 +1,5 @@
-/**
- * AmigoAgent — one Durable Object per user-created agent.
- *
- *  - State (synced live to the UI): config, status, schedule, active run.
- *  - SQLite: run history + long-term memory.
- *  - Chat: talk to the agent directly (AIChatAgent + Llama 3.3 + tools).
- *  - Scheduling: `this.schedule()` (DO alarms) triggers runs.
- *  - Execution: every run is a durable Workflow (see workflows/agent-run.ts).
- */
+// One of these runs for every agent a user creates.
+// It stores the agent's settings, chat, run history and memory, and runs it on schedule.
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { callable, getAgentByName, type Connection } from "agents";
 import {
@@ -15,9 +8,15 @@ import {
   stepCountIs,
   streamText
 } from "ai";
+import type { BrowserWorker } from "@cloudflare/puppeteer";
 import { createWorkersAI } from "workers-ai-provider";
+import { cleanAi } from "../lib/ai";
 import { localCronToUtc, localDateTimeToUtc } from "../lib/schedule";
-import { buildTools, type MemoryStore } from "../lib/tools";
+import {
+  buildTools,
+  type MemoryStore,
+  type WorkspaceTools
+} from "../lib/tools";
 import {
   MODEL,
   type AgentConfig,
@@ -48,6 +47,7 @@ type MemoryRow = {
 
 export type RunContext = {
   config: AgentConfig;
+  workspaceId: string;
   timezone: string;
   memories: Memory[];
   previousOutputs: string[];
@@ -55,7 +55,20 @@ export type RunContext = {
 
 const MAX_MEMORIES = 50;
 
-/** System prompt shared by chat and scheduled runs. */
+// App tools (Gmail, Slack...) run in the user's Workspace, which holds the logins.
+export function workspaceTools(env: Env, workspaceId: string): WorkspaceTools {
+  const stub = () => getAgentByName(env.Workspace, workspaceId);
+  return {
+    callTool: async (name, args) =>
+      (await stub()).callTool(name, args) as Promise<unknown>,
+    notionTools: async () =>
+      (await stub()).notionTools() as Promise<
+        { name: string; description: string; inputSchema: unknown }[]
+      >
+  };
+}
+
+// Instructions for the AI, used in both chat and scheduled runs.
 export function agentSystemPrompt(ctx: {
   config: AgentConfig;
   timezone: string;
@@ -84,6 +97,8 @@ CONTEXT
 - ${mode === "run" ? "This is an automated run. Perform the objective once and return the final result. Do not ask questions; make reasonable assumptions." : "You are chatting with your owner. Answer their questions, help refine your work, and perform the objective if asked."}
 - Scheduling is handled by the platform. Never try to schedule anything yourself.
 - Only use the tools you have. Cite sources as Markdown links when you use the web.
+- If the objective, instructions or user asks you to save, send or post the result (Google Doc, email, Slack, Notion), you MUST call that tool before giving your final answer. Then say where it was saved and include the link. Never claim you saved something without calling the tool.
+- When a time window is mentioned (e.g. "this week"), pass it to the tools (e.g. period: "week").
 - Use the remember tool for durable facts worth keeping between runs (preferences, items already reported). Avoid duplicates of what is already in memory.
 
 LONG-TERM MEMORY
@@ -123,12 +138,12 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     )`;
   }
 
-  /** State is server-authoritative: clients read it, only callables change it. */
+  // The browser can read this state but can't change it directly.
   validateStateChange(_next: AmigoAgentState, source: Connection | "server") {
     if (source !== "server") throw new Error("State is read-only for clients.");
   }
 
-  // ── Lifecycle (called by the Workspace) ─────────────────────────────
+  // Called by the Workspace when the agent is created or deleted
 
   async initialize(input: {
     id: string;
@@ -154,7 +169,7 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     await this.destroy();
   }
 
-  // ── Callables (used by the UI over the WebSocket) ───────────────────
+  // Actions the UI can call
 
   @callable()
   async runNow() {
@@ -179,6 +194,11 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     return this.summary();
   }
 
+  getConfig() {
+    if (!this.state.config) throw new Error("Agent not initialized.");
+    return this.state.config;
+  }
+
   @callable()
   listRuns(limit = 25): AgentRun[] {
     return this
@@ -200,12 +220,12 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     return this.listMemories();
   }
 
-  // ── Chat ────────────────────────────────────────────────────────────
+  // Chat
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const config = this.state.config;
     if (!config) throw new Error("Agent not initialized.");
-    const workersai = createWorkersAI({ binding: this.env.AI });
+    const workersai = createWorkersAI({ binding: cleanAi(this.env.AI) });
 
     const result = streamText({
       model: workersai(MODEL, { sessionAffinity: this.sessionAffinity }),
@@ -219,11 +239,17 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"
       }),
-      tools: buildTools({
+      tools: await buildTools({
         granted: config.tools,
         timezone: this.state.timezone,
         memory: this.memoryStore(),
-        memorySource: "chat"
+        memorySource: "chat",
+        workspace: this.state.workspaceId
+          ? workspaceTools(this.env, this.state.workspaceId)
+          : null,
+        browser: this.env.BROWSER as unknown as BrowserWorker,
+        // In chat, ask the user before sending emails or posting to Slack.
+        requireApproval: true
       }),
       stopWhen: stepCountIs(8),
       abortSignal: options?.abortSignal
@@ -231,9 +257,9 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     return result.toUIMessageStreamResponse();
   }
 
-  // ── Runs (Workflow orchestration) ───────────────────────────────────
+  // Running the agent
 
-  /** Alarm callback registered via this.schedule(). */
+  // Called automatically at the scheduled time.
   async scheduledRun() {
     if (this.state.config?.schedule.type === "once") {
       this.setState({ ...this.state, scheduleId: null, nextRunAt: null });
@@ -261,32 +287,42 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     return runId;
   }
 
-  /** RPC from the workflow: everything a run needs, read once. */
+  // Called by the run workflow to get what it needs.
   getRunContext(): RunContext {
     const config = this.state.config;
     if (!config) throw new Error("Agent not initialized.");
     const previousOutputs = this.sql<{ output: string }>`
       SELECT output FROM runs WHERE status = 'completed' AND output IS NOT NULL
       ORDER BY started_at DESC LIMIT 2`.map((r) => r.output.slice(0, 1500));
+    if (!this.state.workspaceId) throw new Error("Agent has no workspace.");
     return {
       config,
+      workspaceId: this.state.workspaceId,
       timezone: this.state.timezone,
       memories: this.listMemories(),
       previousOutputs
     };
   }
 
-  /** RPC from the workflow. */
+  // Called by the run workflow to save a memory.
   addMemory(content: string, source: Memory["source"]): Memory {
     return this.insertMemory(content, source);
   }
 
-  /** RPC from the workflow: persist the final outcome of a run. */
-  async finishRun(runId: string, result: { output?: string; error?: string }) {
-    const status: RunStatus = result.error ? "failed" : "completed";
+  // Called by the run workflow to save the result.
+  async finishRun(
+    runId: string,
+    result: { output?: string; error?: string; toolErrors?: string[] }
+  ) {
+    const toolErrors = result.toolErrors ?? [];
+    const status: RunStatus = result.error
+      ? "failed"
+      : toolErrors.length
+        ? "partial"
+        : "completed";
     this
       .sql`UPDATE runs SET status = ${status}, output = ${result.output ?? null},
-             error = ${result.error ?? null}, completed_at = ${new Date().toISOString()}
+             error = ${result.error ?? (toolErrors.length ? `Some tools failed:\n${toolErrors.join("\n")}` : null)}, completed_at = ${new Date().toISOString()}
              WHERE id = ${runId}`;
     if (this.state.activeRun?.runId === runId) {
       this.setState({ ...this.state, activeRun: null });
@@ -306,14 +342,14 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     await this.finishRun(runId, { error });
   }
 
-  // ── Scheduling ──────────────────────────────────────────────────────
+  // Scheduling
 
   private async clearSchedule() {
     if (this.state.scheduleId) await this.cancelSchedule(this.state.scheduleId);
     this.setState({ ...this.state, scheduleId: null, nextRunAt: null });
   }
 
-  /** (Re)create the DO alarm schedule from config + status. */
+  // Set up (or clear) the schedule from the agent's settings.
   private async applySchedule() {
     await this.clearSchedule();
     const { config, status, timezone } = this.state;
@@ -347,14 +383,14 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
       this.setState({ ...this.state, nextRunAt });
   }
 
-  // ── Helpers ─────────────────────────────────────────────────────────
+  // Helpers
 
   private insertMemory(content: string, source: Memory["source"]): Memory {
     const createdAt = new Date().toISOString();
     const [row] = this.sql<MemoryRow>`
       INSERT INTO memories (content, source, created_at)
       VALUES (${content.trim()}, ${source}, ${createdAt}) RETURNING *`;
-    // Keep memory bounded: drop the oldest beyond the cap.
+    // Keep only the newest memories.
     this.sql`DELETE FROM memories WHERE id NOT IN
              (SELECT id FROM memories ORDER BY id DESC LIMIT ${MAX_MEMORIES})`;
     return toMemory(row);
@@ -367,6 +403,11 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     };
   }
 
+  // Called by the Workspace to refresh this agent's dashboard card.
+  getSummary(): AgentSummary {
+    return this.summary();
+  }
+
   private summary(): AgentSummary {
     const { config } = this.state;
     const [stats] = this.sql<{
@@ -377,6 +418,10 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     return {
       id: this.state.id ?? this.name,
       name: config?.name ?? "Untitled agent",
+      image: config?.image,
+      objective: config?.objective ?? "",
+      tools: config?.tools ?? [],
+      activeStep: this.state.activeRun?.step ?? null,
       description: config?.description ?? "",
       skills: config?.skills ?? [],
       status: this.state.status,
@@ -389,7 +434,7 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
     };
   }
 
-  /** Push this agent's summary to its Workspace registry (dashboard). */
+  // Update this agent's card on the dashboard.
   private async syncWorkspace() {
     if (!this.state.workspaceId) return;
     const workspace = await getAgentByName(

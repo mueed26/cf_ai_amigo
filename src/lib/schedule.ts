@@ -1,9 +1,6 @@
-/**
- * Timezone helpers. Durable Object alarms (and so `this.schedule`) run in UTC,
- * while the planner produces schedules in the user's local time.
- */
+// Time zone helpers. Schedules run in UTC, but users give times in their own time zone.
 
-/** Minutes the given timezone is ahead of UTC at `at` (e.g. Asia/Kolkata -> 330). */
+// How many minutes a time zone is ahead of UTC (India = 330).
 export function tzOffsetMinutes(timezone: string, at = new Date()): number {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-US", {
@@ -30,7 +27,7 @@ export function tzOffsetMinutes(timezone: string, at = new Date()): number {
   return Math.round((asUtc - at.getTime()) / 60_000);
 }
 
-/** "2026-10-02T09:30" interpreted in `timezone` -> UTC Date. */
+// Turn a local date-time like "2026-10-02T09:30" into a UTC date.
 export function localDateTimeToUtc(local: string, timezone: string): Date {
   const match = local.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
   if (!match) throw new Error(`Invalid local datetime: ${local}`);
@@ -42,12 +39,9 @@ export function localDateTimeToUtc(local: string, timezone: string): Date {
 
 const isInt = (field: string) => /^\d+$/.test(field);
 
-/**
- * Convert a local-time cron to UTC by shifting the minute/hour fields (and the
- * day-of-week when the shift crosses midnight). Expressions whose minute/hour
- * are not plain numbers (e.g. "*\/15 * * * *") are timezone-independent enough
- * to keep as-is. Uses the current UTC offset, so DST changes need a re-save.
- */
+// Convert a cron schedule from local time to UTC.
+// Only fixed times (like "0 9 * * 1-5") need changing.
+// Uses today's UTC offset, so re-save after daylight saving changes.
 export function localCronToUtc(cron: string, timezone: string): string {
   const fields = cron.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error(`Invalid cron expression: ${cron}`);
@@ -63,8 +57,7 @@ export function localCronToUtc(cron: string, timezone: string): string {
   if (dayShift !== 0 && dow !== "*") {
     utcDow = shiftDow(dow, dayShift);
   }
-  // Day-of-month schedules that cross midnight cannot be shifted exactly; keep
-  // the local day (off by one day at most) rather than producing a wrong month.
+  // Day-of-month can't be shifted exactly; at worst it's off by one day.
   return [
     String(wrapped % 60),
     String(Math.floor(wrapped / 60)),
@@ -76,7 +69,7 @@ export function localCronToUtc(cron: string, timezone: string): string {
 
 function shiftDow(dow: string, shift: number): string {
   const mod = (n: number) => (((n + shift) % 7) + 7) % 7;
-  // Expand ranges/lists like "1-5" or "1,3,5" into explicit days, then shift.
+  // Turn "1-5" or "1,3,5" into single days, then shift them.
   const days = new Set<number>();
   for (const part of dow.split(",")) {
     const range = part.match(/^(\d)-(\d)$/);

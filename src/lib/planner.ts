@@ -1,10 +1,13 @@
-/**
- * Prompt-to-agent planner: Llama 3.3 on Workers AI turns a plain-English job
- * description into either clarifying questions or a complete agent config.
- * Ported from AMIGO AI's Gemini planner, using Workers AI JSON mode.
- */
+// Turns a plain-English request into an agent config using Llama 3.3.
+// If something important is missing, it asks questions instead.
 import { z } from "zod";
-import { MODEL, TOOL_CATALOG, type PlanResult, type ToolSlug } from "../shared";
+import {
+  MODEL,
+  TOOL_CATALOG,
+  type ConnectionId,
+  type PlanResult,
+  type ToolSlug
+} from "../shared";
 
 const toolSlugs: string[] = TOOL_CATALOG.map((t) => t.slug);
 const isToolSlug = (t: string): t is ToolSlug => toolSlugs.includes(t);
@@ -42,7 +45,7 @@ const planSchema = z.object({
     .nullable()
 });
 
-// JSON schema handed to Workers AI JSON mode (kept flat; mirrors planSchema).
+// The JSON shape we ask Llama to return.
 const jsonSchema = {
   type: "object",
   properties: {
@@ -100,10 +103,19 @@ const jsonSchema = {
   required: ["status", "questions"]
 };
 
-function systemPrompt(now: string, timezone: string) {
-  const tools = TOOL_CATALOG.map((t) => `- ${t.slug}: ${t.description}`).join(
-    "\n"
-  );
+function systemPrompt(
+  now: string,
+  timezone: string,
+  connected: ConnectionId[]
+) {
+  const tools = TOOL_CATALOG.map((t) => {
+    const status = !t.connection
+      ? "built-in"
+      : connected.includes(t.connection)
+        ? "connected"
+        : "not connected yet (the user can connect it after creating the agent)";
+    return `- ${t.slug}: ${t.description} [${status}]`;
+  }).join("\n");
   return `You are AMIGO, an AI Agent Configuration Architect running on Cloudflare.
 Decide whether the user's request has enough information to create an executable AI agent, and respond ONLY with JSON matching the schema.
 
@@ -124,13 +136,18 @@ SCHEDULE
 - recurring -> schedule.cron is a 5-field cron in the USER'S LOCAL time (minute hour day-of-month month day-of-week, 0=Sunday). Example: "every weekday at 9am" -> "0 9 * * 1-5". label is human readable, e.g. "Weekdays at 09:00".
 - once -> schedule.runAt is a local datetime "YYYY-MM-DDTHH:mm" in the future.
 - config.objective describes only the task performed on each run (no timing words).
+- config.objective MUST include where the result goes when the user names a destination, e.g. "Find the top 5 AI stories on Hacker News this week, summarize each in one line, and save them to a new Google Doc." Never drop the destination.
+- Keep time windows from the request in the objective (e.g. "this week" -> "from the past 7 days").
 - config.instructions tell the agent to perform the task once per run and never to schedule anything itself.
 
 TOOLS (config.tools must only contain these slugs)
 ${tools}
-- Choose web_search + web_fetch when the task needs current information from the internet.
+- Choose web_search when the task needs current information from the internet (it includes reading web pages).
+- Choose gmail to read/search/send email, google_docs to save reports to a doc, notion to read/write Notion, hacker_news for Hacker News research, slack to read or post Slack messages.
+- Select an integration whenever the task needs it, even if it is not connected yet.
 - Agents also always have long-term memory (remember/recall) — do not list it in tools.
-- If the request needs an integration that is not listed (e.g. sending email or Slack), still build the agent but have it produce the content in the app, and mention that in the description.
+- If the request needs an app that is not listed, still build the agent but have it produce the content in the app, and mention that in the description.
+- When the result must be delivered somewhere (email, Slack channel, Notion page, Google Doc), say exactly where in config.instructions; ask a clarifying question if the destination (e.g. Slack channel name) is missing.
 
 STYLE
 - name: short and catchy (2-4 words). description: one sentence.
@@ -146,7 +163,10 @@ export async function planAgent(
     prompt: string;
     answers?: Record<string, string | string[]>;
     timezone: string;
-  }
+    connected: ConnectionId[];
+  },
+  // Called with each new piece of text so the UI can show it live.
+  onText?: (delta: string) => void
 ): Promise<PlanResult> {
   const now = new Date().toLocaleString("en-US", {
     timeZone: input.timezone,
@@ -163,25 +183,25 @@ export async function planAgent(
           .join("\n")}`
       : "";
 
-  const response = (await ai.run(
+  const stream = (await ai.run(
     MODEL as keyof AiModels,
     {
       messages: [
-        { role: "system", content: systemPrompt(now, input.timezone) },
+        {
+          role: "system",
+          content: systemPrompt(now, input.timezone, input.connected)
+        },
         { role: "user", content: `USER REQUEST:\n${input.prompt}${answers}` }
       ],
       response_format: { type: "json_schema", json_schema: jsonSchema },
       max_tokens: 2048,
-      temperature: 0.3
+      temperature: 0.3,
+      stream: true
     } as never
-  )) as { response?: unknown };
+  )) as ReadableStream<Uint8Array>;
 
-  const raw =
-    typeof response.response === "string"
-      ? JSON.parse(extractJson(response.response))
-      : response.response;
-
-  const parsed = planSchema.parse(raw);
+  const text = await readStreamedText(stream, onText);
+  const parsed = planSchema.parse(JSON.parse(extractJson(text)));
 
   if (parsed.status === "ready" && parsed.config) {
     const c = parsed.config;
@@ -189,8 +209,9 @@ export async function planAgent(
       status: "ready",
       config: {
         ...c,
+        image: `https://api.dicebear.com/9.x/bottts/svg?seed=${encodeURIComponent(c.name)}`,
         skills: c.skills.slice(0, 5),
-        // Drop anything the model invented outside the catalog.
+        // Ignore tools that don't exist.
         tools: [...new Set(c.tools.filter(isToolSlug))],
         schedule: {
           type: c.schedule.type,
@@ -209,6 +230,43 @@ export async function planAgent(
     status: "needs_clarification",
     questions: parsed.questions.slice(0, 3)
   };
+}
+
+// Read a Workers AI text stream (server-sent events) and return the full text.
+async function readStreamedText(
+  stream: ReadableStream<Uint8Array>,
+  onText?: (delta: string) => void
+) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+      try {
+        const chunk = JSON.parse(line.slice(6)) as {
+          response?: string;
+          choices?: { delta?: { content?: string } }[];
+        };
+        // Each chunk has the text in two places; use only one.
+        const delta =
+          chunk.choices?.[0]?.delta?.content ?? chunk.response ?? "";
+        if (delta) {
+          text += delta;
+          onText?.(delta);
+        }
+      } catch {
+        // ignore partial or non-JSON lines
+      }
+    }
+  }
+  return text;
 }
 
 function extractJson(text: string) {
