@@ -1,0 +1,19 @@
+# Copy to .dev.vars for local development (.dev.vars is gitignored — never commit it).
+# In production set each one with:  npx wrangler secret put <NAME>
+
+# ── Required: Clerk (sign in / sign up) ─────────────────────────────────────
+# dashboard.clerk.com → your app → API keys.
+# (Same values as NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY in AMIGO AI.)
+CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
+
+# ── Optional: Gmail + Google Docs ───────────────────────────────────────────
+# Google Cloud Console → APIs & Services → Credentials → OAuth client ID
+# (Web application). Authorized redirect URI:
+#   http://localhost:5173/oauth/google/callback
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+
+# Slack and Notion need no env vars: connect them from the Integrations page.
+# Web search and Hacker News need no keys at all.
