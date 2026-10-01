@@ -33,8 +33,10 @@ import type {
 const NOTION_MCP_URL = "https://mcp.notion.com/mcp";
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
 // Only expose a few Notion tools; the AI picks better from a short list.
-const NOTION_TOOL_ALLOWLIST =
-  /search|fetch|create-pages|update-page|create-comment/i;
+const NOTION_TOOL_ALLOWLIST = /search|fetch|update-page|create-comment/i;
+// Notion's own create-pages tool has a nested format Llama often gets wrong,
+// so agents get this simple version and we convert it.
+const NOTION_CREATE_PAGE = "notion_create_page";
 
 // Same as the SDK's login helper, but shows "AMIGO" on Notion's login page
 // instead of the user's ID.
@@ -417,8 +419,21 @@ export class Workspace extends Agent<Env, WorkspaceState> {
       .map((t) => ({
         name: t.name.replace(/[^a-zA-Z0-9_]/g, "_"),
         description: (t.description ?? t.name).slice(0, 1000),
-        inputSchema: t.inputSchema
-      }));
+        inputSchema: t.inputSchema as unknown
+      }))
+      .concat({
+        name: NOTION_CREATE_PAGE,
+        description:
+          "Create a new Notion page with a title and Markdown content. Returns the new page and its link.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Page title" },
+            content: { type: "string", description: "Page content in Markdown" }
+          },
+          required: ["title", "content"]
+        }
+      });
   }
 
   async callTool(name: string, args: unknown) {
@@ -435,22 +450,49 @@ export class Workspace extends Agent<Env, WorkspaceState> {
     if (!server)
       throw new Error(`Unknown tool "${name}" or Notion is not connected.`);
     await this.mcp.waitForConnections({ timeout: 10_000 });
-    const mcpTool = this.mcp
+    const notionTools = this.mcp
       .listTools()
-      .find(
-        (t) =>
-          t.serverId === server.id &&
-          t.name.replace(/[^a-zA-Z0-9_]/g, "_") === name
+      .filter((t) => t.serverId === server.id);
+
+    // Our simple create-page tool, converted to Notion's own format.
+    let mcpName: string;
+    let mcpArgs: Record<string, unknown>;
+    if (name === NOTION_CREATE_PAGE) {
+      const createPages = notionTools.find((t) => /create-pages/i.test(t.name));
+      if (!createPages)
+        throw new Error("This Notion connection can't create pages.");
+      const { title, content } = parseJsonStrings(args ?? {}) as {
+        title?: unknown;
+        content?: unknown;
+      };
+      if (typeof title !== "string" || !title.trim())
+        throw new Error("A page title is required.");
+      mcpName = createPages.name;
+      mcpArgs = {
+        pages: [
+          {
+            properties: { title: title.trim() },
+            content: typeof content === "string" ? content : ""
+          }
+        ]
+      };
+    } else {
+      const mcpTool = notionTools.find(
+        (t) => t.name.replace(/[^a-zA-Z0-9_]/g, "_") === name
       );
-    if (!mcpTool) throw new Error(`Unknown Notion tool "${name}".`);
-    const result = await this.mcp.callTool({
-      serverId: server.id,
-      name: mcpTool.name,
+      if (!mcpTool) throw new Error(`Unknown Notion tool "${name}".`);
+      mcpName = mcpTool.name;
       // The model often sends emoji icons Notion rejects; pages don't need them.
-      arguments: withoutIcons(parseJsonStrings(args ?? {})) as Record<
+      mcpArgs = withoutIcons(parseJsonStrings(args ?? {})) as Record<
         string,
         unknown
-      >
+      >;
+    }
+
+    const result = await this.mcp.callTool({
+      serverId: server.id,
+      name: mcpName,
+      arguments: mcpArgs
     });
     const content = (result.content ?? []) as { type: string; text?: string }[];
     const text = content
