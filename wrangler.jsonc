@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-ai-amigo",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Workers AI — Llama 3.3 plans agents, runs them, and powers chat.
+  "ai": { "binding": "AI", "remote": true },
+
+  // React UI served as static assets; agent traffic hits the Worker first.
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+
+  // Durable Objects (via the Agents SDK):
+  //   Workspace  — one per user workspace: agent registry + the Llama 3.3 planner.
+  //   AmigoAgent — one per created agent: config, chat, schedule, run history, memory (SQLite).
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "Workspace", "name": "Workspace" },
+      { "class_name": "AmigoAgent", "name": "AmigoAgent" }
+    ]
+  },
+
+  // Workflows — durable, retried, multi-step execution of every agent run.
+  "workflows": [
+    {
+      "name": "amigo-agent-run",
+      "binding": "AGENT_RUN_WORKFLOW",
+      "class_name": "AgentRunWorkflow"
+    }
+  ],
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Workspace", "AmigoAgent"] }
+  ]
+}
