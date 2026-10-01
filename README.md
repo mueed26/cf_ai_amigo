@@ -10,7 +10,11 @@
 2. Go to **Agents → Create Agent** and pick a suggestion, e.g. the Hacker News one.
 3. Click **Run Agent**, then open **Chat With Agent** to ask follow-up questions.
 
-Web search, Hacker News, memory, scheduling and chat work without connecting anything. Notion and Slack can be connected from **Integrations**.
+Web search, Hacker News, memory, scheduling and chat work without connecting anything. To let agents use your apps, open **Integrations**:
+
+- **Slack:** click **Connect**, pick your Slack workspace and approve. Agents can then read channels and post messages.
+- **Notion:** click **Connect** and approve in Notion.
+- **Google (Gmail + Docs):** click **Connect** and see the note below.
 
 > **⚠️ Google (Gmail and Docs) shows an "unverified app" warning**
 >
@@ -42,14 +46,14 @@ This is the Cloudflare-native edition of [AMIGO AI](https://github.com/mueed26/A
 
 Agents can act on real apps. There is no third-party integration platform: each connector is built directly on Workers + Durable Objects, and Notion uses the Agents SDK's own MCP client.
 
-| Tool            | How it connects                                                                                                                                                              | Setup                               |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| **Web search**  | DuckDuckGo results + page fetch from the Worker; JavaScript-heavy or bot-blocked pages fall back to **Cloudflare Browser Run** (headless Chrome via `@cloudflare/puppeteer`) | None (Browser Run: 10 free min/day) |
-| **Gmail**       | Google OAuth 2.0 (own flow in the Worker); tokens + refresh in the Workspace DO                                                                                              | Google Cloud OAuth client (free)    |
-| **Google Docs** | Same Google connection                                                                                                                                                       | (same)                              |
-| **Notion**      | **Notion's official remote MCP server** via `this.addMcpServer()`; the SDK handles OAuth + persistence                                                                       | None — click Connect                |
-| **Slack**       | Slack Web API with a bot token                                                                                                                                               | Slack app + bot token (free)        |
-| **Hacker News** | Official Algolia HN Search API, called from the Worker                                                                                                                       | None                                |
+| Tool            | How it connects                                                                                                                                                              | Setup                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| **Web search**  | DuckDuckGo results + page fetch from the Worker; JavaScript-heavy or bot-blocked pages fall back to **Cloudflare Browser Run** (headless Chrome via `@cloudflare/puppeteer`) | None (Browser Run: 10 free min/day)       |
+| **Gmail**       | Google OAuth 2.0 (own flow in the Worker); tokens + refresh in the Workspace DO                                                                                              | Google Cloud OAuth client (free)          |
+| **Google Docs** | Same Google connection                                                                                                                                                       | (same)                                    |
+| **Notion**      | **Notion's official remote MCP server** via `this.addMcpServer()`; the SDK handles OAuth + persistence                                                                       | None — click Connect                      |
+| **Slack**       | "Add to Slack" OAuth 2.0 (same flow as Google, in the Worker); bot token stored in the Workspace DO. Pasting a bot token still works as a fallback                           | Slack app with public distribution (free) |
+| **Hacker News** | Official Algolia HN Search API, called from the Worker                                                                                                                       | None                                      |
 
 **Credentials never leave the Workspace Durable Object.** Agents and Workflows only see tool names and schemas; when the model calls a tool, the call is made over DO RPC to the Workspace, which attaches the token, calls the API, and returns the result. The synced UI state only contains connection status.
 
@@ -134,7 +138,7 @@ npm run dev
 Open the URL Vite prints (usually http://localhost:5173). Web search, memory and Notion work immediately. For the other integrations, copy `.dev.vars.example` to `.dev.vars`, fill in what you want, and restart `npm run dev`:
 
 - **Google (Gmail + Docs):** [Google Cloud Console](https://console.cloud.google.com/) → new project → enable **Gmail API** and **Google Docs API** → OAuth consent screen (External, add yourself as a test user) → Credentials → OAuth client ID (Web application) with redirect URI `http://localhost:5173/oauth/google/callback`.
-- **Slack:** no env vars. Create an app at [api.slack.com/apps](https://api.slack.com/apps), add the bot scopes listed on the Integrations page, install it, and paste the bot token into the Integrations page.
+- **Slack:** create an app at [api.slack.com/apps](https://api.slack.com/apps) with the bot scopes `chat:write`, `chat:write.public`, `channels:read`, `channels:history`, `channels:join`. For one-click **Connect**, add `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` (Basic Information) to `.dev.vars`, add the redirect URL `https://localhost:5173/oauth/slack/callback`, and turn on **Manage Distribution → Public Distribution**. Slack only allows its login over https, so run `npm run dev:https` (a self-signed certificate; click through the browser warning) instead of `npm run dev`. Without these, paste the app's bot token on the Integrations page instead.
 
 When connecting Google, tick **every** permission box on Google's screen. The Integrations page warns you if a permission is missing.
 
@@ -162,9 +166,11 @@ npx wrangler secret put CLERK_PUBLISHABLE_KEY
 npx wrangler secret put CLERK_SECRET_KEY
 npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put SLACK_CLIENT_ID
+npx wrangler secret put SLACK_CLIENT_SECRET
 ```
 
-Also add `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/google/callback` as a redirect URI on your Google OAuth client.
+Also add `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/google/callback` as a redirect URI on your Google OAuth client, and `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/slack/callback` as a redirect URL on your Slack app.
 
 ## Tests and CI/CD
 

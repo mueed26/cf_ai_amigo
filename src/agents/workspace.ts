@@ -13,7 +13,7 @@ import { AGENT_ID_SEPARATOR } from "../lib/auth";
 import { findIntegrationTool } from "../lib/integrations";
 import { GOOGLE_SCOPES } from "../lib/integrations/google";
 import { secrets } from "../lib/integrations/secrets";
-import { slackApi } from "../lib/integrations/slack";
+import { SLACK_BOT_SCOPES, slackApi } from "../lib/integrations/slack";
 import type { Provider } from "../lib/integrations/types";
 import { planAgent } from "../lib/planner";
 import { MAX_AGENTS } from "../shared";
@@ -289,11 +289,7 @@ export class Workspace extends Agent<Env, WorkspaceState> {
     const { GOOGLE_CLIENT_ID } = secrets(this.env);
     if (!GOOGLE_CLIENT_ID)
       throw new Error("GOOGLE_CLIENT_ID is not configured.");
-    const nonce = crypto.randomUUID();
-    this
-      .sql`DELETE FROM oauth_states WHERE created_at < ${Date.now() - OAUTH_STATE_TTL_MS}`;
-    this.sql`INSERT INTO oauth_states (nonce, provider, created_at)
-             VALUES (${nonce}, 'google', ${Date.now()})`;
+    const nonce = this.createOAuthState("google");
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
       redirect_uri: redirectUri,
@@ -309,11 +305,7 @@ export class Workspace extends Agent<Env, WorkspaceState> {
 
   // Finish the Google login and save the tokens.
   async completeGoogleOAuth(nonce: string, code: string, redirectUri: string) {
-    const [state] = this.sql<{ created_at: number }>`
-      DELETE FROM oauth_states WHERE nonce = ${nonce} AND provider = 'google' RETURNING created_at`;
-    if (!state || state.created_at < Date.now() - OAUTH_STATE_TTL_MS) {
-      throw new Error("Sign-in link expired or invalid. Please try again.");
-    }
+    this.useOAuthState("google", nonce);
     const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = secrets(this.env);
     const token = await googleTokenRequest({
       code,
@@ -335,6 +327,73 @@ export class Workspace extends Agent<Env, WorkspaceState> {
       account: profile.email ?? "Google account",
       scope: token.scope ?? null
     });
+  }
+
+  // Build the "Add to Slack" login URL.
+  beginSlackOAuth(redirectUri: string) {
+    const { SLACK_CLIENT_ID } = secrets(this.env);
+    if (!SLACK_CLIENT_ID) throw new Error("SLACK_CLIENT_ID is not configured.");
+    const nonce = this.createOAuthState("slack");
+    const params = new URLSearchParams({
+      client_id: SLACK_CLIENT_ID,
+      scope: SLACK_BOT_SCOPES.join(","),
+      redirect_uri: redirectUri,
+      state: `${this.name}:${nonce}`
+    });
+    return `https://slack.com/oauth/v2/authorize?${params}`;
+  }
+
+  // Finish the Slack login and save the workspace's bot token.
+  async completeSlackOAuth(nonce: string, code: string, redirectUri: string) {
+    this.useOAuthState("slack", nonce);
+    const { SLACK_CLIENT_ID, SLACK_CLIENT_SECRET } = secrets(this.env);
+    const res = await fetch("https://slack.com/api/oauth.v2.access", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: SLACK_CLIENT_ID ?? "",
+        client_secret: SLACK_CLIENT_SECRET ?? "",
+        code,
+        redirect_uri: redirectUri
+      }).toString()
+    });
+    const data = (await res.json()) as {
+      ok: boolean;
+      error?: string;
+      access_token?: string;
+      scope?: string;
+      team?: { name?: string };
+    };
+    if (!data.ok || !data.access_token) {
+      throw new Error(
+        `Slack sign-in failed: ${data.error ?? "no token returned"}`
+      );
+    }
+    this.saveToken("slack", {
+      access_token: data.access_token,
+      account: data.team?.name ?? "Slack workspace",
+      scope: data.scope ?? null
+    });
+  }
+
+  // One-time code that ties an OAuth callback to this workspace.
+  private createOAuthState(provider: Provider) {
+    const nonce = crypto.randomUUID();
+    this
+      .sql`DELETE FROM oauth_states WHERE created_at < ${Date.now() - OAUTH_STATE_TTL_MS}`;
+    this.sql`INSERT INTO oauth_states (nonce, provider, created_at)
+             VALUES (${nonce}, ${provider}, ${Date.now()})`;
+    return nonce;
+  }
+
+  // Check and use up a one-time code (each one works once, for 10 minutes).
+  private useOAuthState(provider: Provider, nonce: string) {
+    const [state] = this.sql<{ created_at: number }>`
+      DELETE FROM oauth_states WHERE nonce = ${nonce} AND provider = ${provider}
+      RETURNING created_at`;
+    if (!state || state.created_at < Date.now() - OAUTH_STATE_TTL_MS) {
+      throw new Error("Sign-in link expired or invalid. Please try again.");
+    }
   }
 
   // Running app tools for agents
@@ -448,6 +507,7 @@ export class Workspace extends Agent<Env, WorkspaceState> {
       rows.find((r) => r.provider === p)?.account ?? null;
     const s = secrets(this.env);
     const notion = this.notionServer();
+    const slackOAuth = !!(s.SLACK_CLIENT_ID && s.SLACK_CLIENT_SECRET);
     const googleConfigured = !!(s.GOOGLE_CLIENT_ID && s.GOOGLE_CLIENT_SECRET);
 
     const connections: ConnectionStatus[] = [
@@ -477,7 +537,7 @@ export class Workspace extends Agent<Env, WorkspaceState> {
       {
         id: "slack",
         name: "Slack",
-        method: "token",
+        method: slackOAuth ? "oauth" : "token",
         connected: !!account("slack"),
         account: account("slack"),
         detail: null

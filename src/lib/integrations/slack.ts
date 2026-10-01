@@ -3,6 +3,15 @@
 import { z } from "zod";
 import { defineTool, type IntegrationContext } from "./types";
 
+// Bot permissions requested when a user clicks "Connect with Slack".
+export const SLACK_BOT_SCOPES = [
+  "chat:write",
+  "chat:write.public",
+  "channels:read",
+  "channels:history",
+  "channels:join"
+];
+
 type SlackResponse = { ok: boolean; error?: string; [key: string]: unknown };
 
 export async function slackApi<T extends SlackResponse>(

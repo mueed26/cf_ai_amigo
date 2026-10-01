@@ -2,6 +2,8 @@
 export type Secrets = {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  SLACK_CLIENT_ID?: string;
+  SLACK_CLIENT_SECRET?: string;
 };
 
 export function secrets(env: Env): Secrets {

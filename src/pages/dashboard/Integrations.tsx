@@ -29,7 +29,8 @@ const DESCRIPTIONS: Record<ConnectionId, string> = {
     "Read and send Gmail, and create or update Google Docs. Signs in with Google OAuth.",
   notion:
     "Search, read and write Notion pages through Notion's official MCP server.",
-  slack: "Read channels and post messages with your Slack bot."
+  slack:
+    "Read channels and post messages. Pick your Slack workspace and approve."
 };
 
 const BUILT_IN = [
@@ -64,6 +65,9 @@ export default function IntegrationsPage() {
   const [busy, setBusy] = useState<ConnectionId | null>(null);
   const [slackOpen, setSlackOpen] = useState(false);
   const [slackToken, setSlackToken] = useState("");
+  const slackOAuthAvailable = window.location.protocol === "https:";
+  const slackConfigured =
+    state?.connections.find((c) => c.id === "slack")?.method === "oauth";
 
   async function run(id: ConnectionId, fn: () => Promise<void>) {
     setBusy(id);
@@ -76,23 +80,34 @@ export default function IntegrationsPage() {
     }
   }
 
-  function connect(c: ConnectionStatus) {
-    if (c.id === "slack") return setSlackOpen(true);
+  // Google and Slack logins go through our server in a popup.
+  // Pass the login token so the server knows who is connecting.
+  function openOAuth(provider: "google" | "slack") {
     const popup = openPopup();
-    if (c.id === "google") {
-      // Pass the login token so the server knows who is connecting.
-      run("google", async () => {
-        const token = (await getToken()) ?? "";
-        if (popup)
-          popup.location.href = `/oauth/google/start?token=${encodeURIComponent(token)}`;
-      });
-    } else {
-      run("notion", async () => {
-        const { authUrl } = await workspace.stub.connectNotion();
-        if (authUrl && popup) popup.location.href = authUrl;
-        else popup?.close();
-      });
+    run(provider, async () => {
+      const token = (await getToken()) ?? "";
+      if (popup) {
+        popup.location.href = `/oauth/${provider}/start?token=${encodeURIComponent(token)}`;
+      }
+    });
+  }
+
+  function connect(c: ConnectionStatus) {
+    if (c.id === "google") return openOAuth("google");
+    if (c.id === "slack") {
+      // Slack only allows its login on https, so plain http://localhost
+      // falls back to pasting a bot token.
+      if (c.method === "oauth" && slackOAuthAvailable)
+        return openOAuth("slack");
+      return setSlackOpen(true);
     }
+    // Notion's login is handled by the Agents SDK's MCP client.
+    const popup = openPopup();
+    run("notion", async () => {
+      const { authUrl } = await workspace.stub.connectNotion();
+      if (authUrl && popup) popup.location.href = authUrl;
+      else popup?.close();
+    });
   }
 
   return (
@@ -190,6 +205,9 @@ export default function IntegrationsPage() {
           <DialogHeader>
             <DialogTitle>Connect Slack</DialogTitle>
             <DialogDescription>
+              {slackConfigured
+                ? "One-click Slack connect needs https. Use the live site or run npm run dev:https, or paste a bot token below. "
+                : ""}
               Create a Slack app at api.slack.com/apps with the bot scopes
               chat:write, chat:write.public, channels:read, channels:history and
               channels:join. Install it, then paste the Bot User OAuth Token

@@ -2,7 +2,7 @@
 // /api/health: health check
 // /api/config: Clerk key for the front end
 // /agents/...: agents (login required)
-// /oauth/google/...: Google login
+// /oauth/google/..., /oauth/slack/...: Google and Slack logins
 // everything else: the React app
 import { getAgentByName, routeAgentRequest } from "agents";
 import { authenticate, canAccess, clerkConfig, unauthorized } from "./lib/auth";
@@ -12,43 +12,49 @@ export { Workspace } from "./agents/workspace";
 export { AmigoAgent } from "./agents/amigo-agent";
 export { AgentRunWorkflow } from "./workflows/agent-run";
 
-async function handleGoogleOAuth(request: Request, env: Env, url: URL) {
-  const redirectUri = `${url.origin}/oauth/google/callback`;
+// Google and Slack logins. "start" needs the user's Clerk token; the callback
+// is proven by the one-time state code (the provider won't send our token).
+async function handleOAuth(request: Request, env: Env, url: URL) {
+  const match = url.pathname.match(
+    /^\/oauth\/(google|slack)\/(start|callback)$/
+  );
+  if (!match) return null;
+  const [, provider, step] = match as unknown as [
+    string,
+    "google" | "slack",
+    string
+  ];
+  const redirectUri = `${url.origin}/oauth/${provider}/callback`;
 
-  if (url.pathname === "/oauth/google/start") {
-    const userId = await authenticate(request, env);
-    if (!userId) return popupResponse(false, "Please sign in again.");
-    try {
+  try {
+    if (step === "start") {
+      const userId = await authenticate(request, env);
+      if (!userId) return popupResponse(false, "Please sign in again.");
       const workspace = await getAgentByName(env.Workspace, userId);
-      return Response.redirect(
-        await workspace.beginGoogleOAuth(redirectUri),
-        302
-      );
-    } catch (e) {
-      return popupResponse(false, e instanceof Error ? e.message : String(e));
+      const authUrl =
+        provider === "google"
+          ? await workspace.beginGoogleOAuth(redirectUri)
+          : await workspace.beginSlackOAuth(redirectUri);
+      return Response.redirect(authUrl, 302);
     }
-  }
 
-  if (url.pathname === "/oauth/google/callback") {
-    // Google doesn't send our login token here; the one-time state code proves who started it.
     const state = url.searchParams.get("state") ?? "";
     const sep = state.lastIndexOf(":");
     const [workspaceId, nonce] = [state.slice(0, sep), state.slice(sep + 1)];
     const code = url.searchParams.get("code");
     const error = url.searchParams.get("error");
     if (error) return popupResponse(false, error);
-    if (!code || sep <= 0 || !nonce)
+    if (!code || sep <= 0 || !nonce) {
       return popupResponse(false, "Invalid OAuth callback.");
-    try {
-      const workspace = await getAgentByName(env.Workspace, workspaceId);
-      await workspace.completeGoogleOAuth(nonce, code, redirectUri);
-      return popupResponse(true);
-    } catch (e) {
-      return popupResponse(false, e instanceof Error ? e.message : String(e));
     }
+    const workspace = await getAgentByName(env.Workspace, workspaceId);
+    if (provider === "google")
+      await workspace.completeGoogleOAuth(nonce, code, redirectUri);
+    else await workspace.completeSlackOAuth(nonce, code, redirectUri);
+    return popupResponse(true);
+  } catch (e) {
+    return popupResponse(false, e instanceof Error ? e.message : String(e));
   }
-
-  return null;
 }
 
 // Notion's login redirect; the Agents SDK checks it itself.
@@ -75,8 +81,8 @@ export default {
       });
     }
 
-    if (url.pathname.startsWith("/oauth/google/")) {
-      const response = await handleGoogleOAuth(request, env, url);
+    if (url.pathname.startsWith("/oauth/")) {
+      const response = await handleOAuth(request, env, url);
       if (response) return response;
     }
 

@@ -15,5 +15,13 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 
 
-# Slack and Notion need no env vars: connect them from the Integrations page.
+# ── Optional: Slack one-click "Connect" (otherwise paste a bot token) ───────
+# api.slack.com/apps → your app → Basic Information → App Credentials.
+# Redirect URLs (OAuth & Permissions): your live URL + /oauth/slack/callback,
+# and https://localhost:5173/oauth/slack/callback for `npm run dev:https`.
+# Manage Distribution → Activate Public Distribution so any workspace can connect.
+SLACK_CLIENT_ID=
+SLACK_CLIENT_SECRET=
+
+# Notion needs no env vars: connect it from the Integrations page.
 # Web search and Hacker News need no keys at all.
