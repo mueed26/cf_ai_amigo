@@ -1,4 +1,5 @@
 // Main server entry.
+// /api/health: health check
 // /api/config: Clerk key for the front end
 // /agents/...: agents (login required)
 // /oauth/google/...: Google login
@@ -58,6 +59,15 @@ function isMcpOAuthCallback(url: URL, className: string) {
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
+
+    // Simple health check for uptime monitors and the deploy pipeline.
+    if (url.pathname === "/api/health") {
+      return Response.json({
+        ok: true,
+        service: "cf-ai-amigo",
+        time: new Date().toISOString()
+      });
+    }
 
     if (url.pathname === "/api/config") {
       return Response.json({

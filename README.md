@@ -166,13 +166,18 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Also add `https://cf-ai-amigo.<your-subdomain>.workers.dev/oauth/google/callback` as a redirect URI on your Google OAuth client.
 
-## Checks
+## Tests and CI/CD
 
 ```bash
-npm run check
+npm run check   # formatting (oxfmt), lint (oxlint) and TypeScript typecheck
+npm test        # unit tests (Vitest)
 ```
 
-This runs formatting (oxfmt), lint (oxlint) and the TypeScript typecheck. It also runs in GitHub Actions on every push.
+The tests cover the parts most likely to break: time zone to UTC cron conversion, the fix for Llama 3.3's duplicated stream chunks, login and ownership checks, the streaming planner (including dropping invented tools), web search parsing and the Hacker News tools.
+
+GitHub Actions ([`.github/workflows/sanity-check.yml`](.github/workflows/sanity-check.yml)) runs the checks, tests and build on every push and pull request. Pushes to `main` that pass are **deployed to Cloudflare automatically**, then the pipeline checks `/api/health` on the live site. Auto-deploy needs two repository secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+
+Runs are traced with structured JSON logs (`run_start`, `tool_call`, `run_finish`, each with the run ID, tool, duration and errors), searchable in Workers Logs, and each run's tool calls are shown as **Steps** in the app.
 
 ## Security notes and limitations
 

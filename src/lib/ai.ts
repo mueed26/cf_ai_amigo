@@ -3,7 +3,7 @@
 // `choices[0].delta`. The AI SDK provider reads both, so chat showed every word
 // twice and tool inputs became broken JSON. We keep only the `choices` copy.
 
-function dedupeSseLine(line: string) {
+export function dedupeSseLine(line: string) {
   if (!line.startsWith("data: ") || line === "data: [DONE]") return line;
   try {
     const chunk = JSON.parse(line.slice(6)) as Record<string, unknown>;

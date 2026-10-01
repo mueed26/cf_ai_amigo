@@ -24,7 +24,9 @@ export function tzOffsetMinutes(timezone: string, at = new Date()): number {
     Number(parts.minute),
     Number(parts.second)
   );
-  return Math.round((asUtc - at.getTime()) / 60_000);
+  // Compare whole seconds (the formatted parts have no milliseconds).
+  const atSeconds = at.getTime() - at.getMilliseconds();
+  return Math.round((asUtc - atSeconds) / 60_000);
 }
 
 // Turn a local date-time like "2026-10-02T09:30" into a UTC date.
