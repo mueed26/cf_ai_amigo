@@ -8,13 +8,12 @@
       content="Describe a job in plain English; AMIGO builds, schedules and runs an AI agent on Cloudflare."
     />
     <title>AMIGO on Cloudflare</title>
-    <link rel="icon" href="/favicon.ico" />
+    <link rel="icon" href="/logo.svg" type="image/svg+xml" />
     <script>
-      (() => {
-        const mode = localStorage.getItem("theme") || "light";
-        document.documentElement.setAttribute("data-mode", mode);
-        document.documentElement.style.colorScheme = mode;
-      })();
+      try {
+        if (localStorage.getItem("theme") === "dark")
+          document.documentElement.classList.add("dark");
+      } catch (e) {}
     </script>
   </head>
   <body>
