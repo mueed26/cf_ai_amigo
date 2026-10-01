@@ -17,8 +17,9 @@ import {
   type AmigoAgent,
   type RunContext
 } from "../agents/amigo-agent";
+import { log } from "../lib/log";
 import { buildTools } from "../lib/tools";
-import { MODEL } from "../shared";
+import { MODEL, type ToolCallRecord } from "../shared";
 
 type RunParams = { runId: string };
 
@@ -41,10 +42,10 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
       );
 
       await this.reportProgress({ step: "working" });
-      const { output, toolErrors } = await step.do(
+      const { output, toolCalls } = await step.do(
         "execute",
         LLM_RETRY,
-        async () => this.execute(ctx)
+        async () => this.execute(ctx, runId)
       );
 
       await this.reportProgress({ step: "updating memory" });
@@ -56,11 +57,11 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
         });
       } catch (error) {
         // Saving memories is optional; don't fail the run over it.
-        console.warn(`Reflection failed for run ${runId}:`, error);
+        log("reflection_failed", { runId, error: String(error) });
       }
 
       await step.do("save-result", async () => {
-        await this.agent.finishRun(runId, { output, toolErrors });
+        await this.agent.finishRun(runId, { output, toolCalls });
       });
       return { output };
     } catch (error) {
@@ -73,8 +74,10 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
   }
 
   // Do the task with Llama 3.3 and the agent's tools (max 10 steps).
-  private async execute(ctx: RunContext) {
+  private async execute(ctx: RunContext, runId: string) {
     const workersai = createWorkersAI({ binding: cleanAi(this.env.AI) });
+    // Every tool call in this run, with timings, for the run's "Steps".
+    const toolCalls: ToolCallRecord[] = [];
     const previous = ctx.previousOutputs.length
       ? `\n\nYOUR PREVIOUS RESULTS (avoid repeating them unless still relevant):\n${ctx.previousOutputs
           .map((o, i) => `--- run -${i + 1} ---\n${o}`)
@@ -96,7 +99,9 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
         workspace: workspaceTools(this.env, ctx.workspaceId),
         browser: this.env.BROWSER as unknown as BrowserWorker,
         // No one is watching scheduled runs, so don't wait for approval.
-        requireApproval: false
+        requireApproval: false,
+        trace: { runId, agent: ctx.config.name },
+        calls: toolCalls
       }),
       stopWhen: stepCountIs(10)
     });
@@ -104,18 +109,7 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
     const text = result.text.trim();
     if (!text) throw new Error("The model returned an empty result.");
 
-    // Tools return { error } instead of throwing, so collect those here.
-    const toolErrors = result.steps.flatMap((s) =>
-      s.toolResults
-        .filter(
-          (r) => r.output && typeof r.output === "object" && "error" in r.output
-        )
-        .map(
-          (r) =>
-            `${r.toolName}: ${String((r.output as { error: unknown }).error).slice(0, 200)}`
-        )
-    );
-    return { output: text, toolErrors };
+    return { output: text, toolCalls };
   }
 
   // Ask the AI which new facts from this run are worth remembering.

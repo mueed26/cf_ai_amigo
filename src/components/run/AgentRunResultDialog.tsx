@@ -1,5 +1,12 @@
 // Dialog showing one run's result, with any errors on top.
-import { CalendarCheck, CircleAlert, ClipboardList } from "lucide-react";
+import {
+  CalendarCheck,
+  Check,
+  CircleAlert,
+  ClipboardList,
+  Wrench,
+  X
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -70,6 +77,42 @@ export default function AgentRunResultDialog({
               <p className="whitespace-pre-wrap text-sm leading-6">
                 {run.error}
               </p>
+            </section>
+          )}
+
+          {run && run.toolCalls?.length > 0 && (
+            <section className="mb-5">
+              <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+                <Wrench className="size-4" /> Steps ({run.toolCalls.length} tool
+                calls)
+              </h3>
+              <ol className="space-y-1.5">
+                {run.toolCalls.map((call, i) => (
+                  <li
+                    key={i}
+                    className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"
+                  >
+                    {call.ok ? (
+                      <Check className="mt-0.5 size-4 shrink-0 text-green-600" />
+                    ) : (
+                      <X className="mt-0.5 size-4 shrink-0 text-red-600" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex justify-between gap-3">
+                        <span className="font-mono text-xs">{call.tool}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {(call.ms / 1000).toFixed(1)}s
+                        </span>
+                      </div>
+                      {call.error && (
+                        <p className="mt-1 text-xs break-words text-red-700">
+                          {call.error}
+                        </p>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ol>
             </section>
           )}
 

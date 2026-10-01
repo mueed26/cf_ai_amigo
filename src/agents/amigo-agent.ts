@@ -11,6 +11,7 @@ import {
 import type { BrowserWorker } from "@cloudflare/puppeteer";
 import { createWorkersAI } from "workers-ai-provider";
 import { cleanAi } from "../lib/ai";
+import { log } from "../lib/log";
 import { localCronToUtc, localDateTimeToUtc } from "../lib/schedule";
 import {
   buildTools,
@@ -25,6 +26,7 @@ import {
   type AmigoAgentState,
   type Memory,
   type RunStatus,
+  type ToolCallRecord,
   type RunTrigger
 } from "../shared";
 
@@ -36,6 +38,7 @@ type RunRow = {
   error: string | null;
   started_at: string;
   completed_at: string | null;
+  tool_calls: string | null;
 };
 
 type MemoryRow = {
@@ -54,6 +57,8 @@ export type RunContext = {
 };
 
 const MAX_MEMORIES = 50;
+// A run with no news for this long is treated as stuck.
+const STUCK_RUN_MS = 30 * 60_000;
 
 // App tools (Gmail, Slack...) run in the user's Workspace, which holds the logins.
 export function workspaceTools(env: Env, workspaceId: string): WorkspaceTools {
@@ -130,6 +135,12 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
       started_at TEXT NOT NULL,
       completed_at TEXT
     )`;
+    // Older agents don't have the tool_calls column yet.
+    try {
+      this.sql`ALTER TABLE runs ADD COLUMN tool_calls TEXT`;
+    } catch {
+      // column already exists
+    }
     this.sql`CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       content TEXT NOT NULL,
@@ -249,7 +260,8 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
           : null,
         browser: this.env.BROWSER as unknown as BrowserWorker,
         // In chat, ask the user before sending emails or posting to Slack.
-        requireApproval: true
+        requireApproval: true,
+        trace: { agentId: this.name, mode: "chat" }
       }),
       stopWhen: stepCountIs(8),
       abortSignal: options?.abortSignal
@@ -274,15 +286,39 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
 
   private async startRun(trigger: RunTrigger) {
     if (!this.state.config) throw new Error("Agent not initialized.");
-    if (this.state.activeRun) throw new Error("A run is already in progress.");
     if (trigger === "schedule" && this.state.status !== "active") return null;
 
-    const runId = crypto.randomUUID();
-    this.sql`INSERT INTO runs (id, trigger, status, started_at)
-             VALUES (${runId}, ${trigger}, 'running', ${new Date().toISOString()})`;
-    this.setState({ ...this.state, activeRun: { runId, step: "queued" } });
+    // A run that never reported back would block the agent forever,
+    // so a run older than the limit is marked failed and replaced.
+    const active = this.state.activeRun;
+    if (active) {
+      const age = Date.now() - new Date(active.startedAt ?? 0).getTime();
+      if (age < STUCK_RUN_MS) throw new Error("A run is already in progress.");
+      await this.finishRun(active.runId, {
+        error: "Run stopped responding and was cancelled."
+      });
+    }
 
-    await this.runWorkflow("AGENT_RUN_WORKFLOW", { runId }, { id: runId });
+    const runId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    this.sql`INSERT INTO runs (id, trigger, status, started_at)
+             VALUES (${runId}, ${trigger}, 'running', ${startedAt})`;
+    this.setState({
+      ...this.state,
+      activeRun: { runId, step: "queued", startedAt }
+    });
+    log("run_start", { agentId: this.name, runId, trigger });
+
+    try {
+      await this.runWorkflow("AGENT_RUN_WORKFLOW", { runId }, { id: runId });
+    } catch (e) {
+      // The workflow never started, so don't leave the agent "running".
+      const message = e instanceof Error ? e.message : String(e);
+      await this.finishRun(runId, {
+        error: `Couldn't start the run: ${message}`
+      });
+      throw e;
+    }
     await this.syncWorkspace();
     return runId;
   }
@@ -312,9 +348,12 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
   // Called by the run workflow to save the result.
   async finishRun(
     runId: string,
-    result: { output?: string; error?: string; toolErrors?: string[] }
+    result: { output?: string; error?: string; toolCalls?: ToolCallRecord[] }
   ) {
-    const toolErrors = result.toolErrors ?? [];
+    const toolCalls = result.toolCalls ?? [];
+    const toolErrors = toolCalls
+      .filter((c) => !c.ok)
+      .map((c) => `${c.tool}: ${c.error ?? "failed"}`);
     const status: RunStatus = result.error
       ? "failed"
       : toolErrors.length
@@ -322,8 +361,17 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
         : "completed";
     this
       .sql`UPDATE runs SET status = ${status}, output = ${result.output ?? null},
-             error = ${result.error ?? (toolErrors.length ? `Some tools failed:\n${toolErrors.join("\n")}` : null)}, completed_at = ${new Date().toISOString()}
+             error = ${result.error ?? (toolErrors.length ? `Some tools failed:\n${toolErrors.join("\n")}` : null)}, completed_at = ${new Date().toISOString()},
+             tool_calls = ${JSON.stringify(toolCalls)}
              WHERE id = ${runId}`;
+    log("run_finish", {
+      agentId: this.name,
+      runId,
+      status,
+      toolCalls: toolCalls.length,
+      failedTools: toolErrors.length,
+      error: result.error
+    });
     if (this.state.activeRun?.runId === runId) {
       this.setState({ ...this.state, activeRun: null });
     }
@@ -333,8 +381,9 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
 
   async onWorkflowProgress(_name: string, runId: string, progress: unknown) {
     const step = (progress as { step?: string })?.step ?? "running";
-    if (this.state.activeRun?.runId === runId) {
-      this.setState({ ...this.state, activeRun: { runId, step } });
+    const active = this.state.activeRun;
+    if (active?.runId === runId) {
+      this.setState({ ...this.state, activeRun: { ...active, step } });
     }
   }
 
@@ -453,7 +502,10 @@ function toRun(r: RunRow): AgentRun {
     output: r.output,
     error: r.error,
     startedAt: r.started_at,
-    completedAt: r.completed_at
+    completedAt: r.completed_at,
+    toolCalls: r.tool_calls
+      ? (JSON.parse(r.tool_calls) as ToolCallRecord[])
+      : []
   };
 }
 

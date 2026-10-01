@@ -34,7 +34,9 @@ export default function Overview() {
 
   const data = useMemo(() => {
     const all = runs ?? [];
-    const completed = all.filter(
+    // Same meaning as the Runs page: "completed" excludes runs with tool errors.
+    const completed = all.filter((r) => r.status === "completed");
+    const finished = all.filter(
       (r) => r.status === "completed" || r.status === "partial"
     );
     const attention = all.filter(
@@ -49,7 +51,7 @@ export default function Overview() {
       attention,
       running,
       upNext,
-      latest: completed.slice(0, 4)
+      latest: finished.slice(0, 4)
     };
   }, [runs, agents]);
 

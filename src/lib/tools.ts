@@ -1,11 +1,17 @@
 // Builds the list of tools an agent can use: web, memory, Hacker News and apps.
 import { jsonSchema, tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { TOOL_CATALOG, type Memory, type ToolSlug } from "../shared";
+import {
+  TOOL_CATALOG,
+  type Memory,
+  type ToolCallRecord,
+  type ToolSlug
+} from "../shared";
 import { INTEGRATION_TOOLS } from "./integrations";
 import type { BrowserWorker } from "@cloudflare/puppeteer";
 import { renderPageText } from "./browser";
 import { hackerNewsTools } from "./hackernews";
+import { log } from "./log";
 import { htmlToText } from "./text";
 
 const MAX_PAGE_CHARS = 8_000;
@@ -161,7 +167,9 @@ export async function buildTools({
   memorySource,
   workspace,
   browser,
-  requireApproval
+  requireApproval,
+  trace,
+  calls
 }: {
   granted: ToolSlug[];
   timezone: string;
@@ -172,6 +180,10 @@ export async function buildTools({
   browser?: BrowserWorker;
   // True in chat: ask before sending or posting.
   requireApproval: boolean;
+  // Extra fields added to every tool log line (agentId, runId).
+  trace?: Record<string, string>;
+  // If given, every tool call is recorded here (used for the run's steps).
+  calls?: ToolCallRecord[];
 }): Promise<ToolSet> {
   const tools: ToolSet = {
     remember: tool({
@@ -243,6 +255,46 @@ export async function buildTools({
         });
       }
     }
+  }
+  return withTracing(tools, trace, calls);
+}
+
+// Wrap every tool so each call is timed, logged and optionally recorded.
+function withTracing(
+  tools: ToolSet,
+  trace: Record<string, string> = {},
+  calls?: ToolCallRecord[]
+): ToolSet {
+  for (const [name, t] of Object.entries(tools)) {
+    const original = (
+      t as { execute?: (...args: unknown[]) => Promise<unknown> }
+    ).execute;
+    if (!original) continue;
+    (t as { execute: (...args: unknown[]) => Promise<unknown> }).execute =
+      async (...args) => {
+        const started = Date.now();
+        let output: unknown;
+        let error: string | undefined;
+        try {
+          output = await original(...args);
+          if (output && typeof output === "object" && "error" in output) {
+            error = String((output as { error: unknown }).error).slice(0, 300);
+          }
+          return output;
+        } catch (e) {
+          error = e instanceof Error ? e.message : String(e);
+          throw e;
+        } finally {
+          const record = {
+            tool: name,
+            ok: !error,
+            ms: Date.now() - started,
+            ...(error ? { error } : {})
+          };
+          calls?.push(record);
+          log("tool_call", { ...trace, ...record });
+        }
+      };
   }
   return tools;
 }

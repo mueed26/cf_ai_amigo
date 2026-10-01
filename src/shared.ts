@@ -116,8 +116,17 @@ export type PlanResult =
 export type RunStatus = "running" | "completed" | "partial" | "failed";
 export type RunTrigger = "manual" | "schedule";
 
+// One tool call made during a run (shown in the run's "Steps").
+export type ToolCallRecord = {
+  tool: string;
+  ok: boolean;
+  ms: number;
+  error?: string;
+};
+
 export type AgentRun = {
   id: string;
+  toolCalls: ToolCallRecord[];
   trigger: RunTrigger;
   status: RunStatus;
   output: string | null;
@@ -177,6 +186,6 @@ export type AmigoAgentState = {
   scheduleId: string | null;
   nextRunAt: string | null;
   // The run in progress, if any.
-  activeRun: { runId: string; step: string } | null;
+  activeRun: { runId: string; step: string; startedAt?: string } | null;
   createdAt: string | null;
 };
