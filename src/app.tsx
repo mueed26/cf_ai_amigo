@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router";
 import { SignIn, SignUp } from "@clerk/react";
 import Landing from "@/pages/Landing";
 import { ErrorBoundary, NotFoundPage } from "@/pages/Errors";
+import { PrivacyPage, TermsPage } from "@/pages/Legal";
 import DashboardLayout from "@/pages/dashboard/Layout";
 import Overview from "@/pages/dashboard/Overview";
 import AgentsPage from "@/pages/dashboard/Agents";
@@ -31,6 +32,8 @@ export default function App() {
     <ErrorBoundary>
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
         <Route
           path="/sign-in/*"
           element={

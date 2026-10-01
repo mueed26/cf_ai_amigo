@@ -341,6 +341,28 @@ export default function Landing() {
           </PrimaryLink>
         </div>
       </section>
+      <footer className="border-t border-slate-200 bg-white">
+        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-6 text-sm text-slate-500 md:px-8">
+          <span>
+            AMIGO on Cloudflare · built for the Cloudflare AI application
+            assignment
+          </span>
+          <div className="flex gap-4">
+            <Link to="/privacy" className="hover:text-slate-900">
+              Privacy
+            </Link>
+            <Link to="/terms" className="hover:text-slate-900">
+              Terms
+            </Link>
+            <a
+              href="https://github.com/mueed26/cf_ai_amigo"
+              className="hover:text-slate-900"
+            >
+              GitHub
+            </a>
+          </div>
+        </div>
+      </footer>
     </main>
   );
 }

@@ -2,11 +2,32 @@
 
 **Describe a job in plain English. AMIGO designs an AI agent for it, schedules it, runs it durably, and lets it remember what it learned. Everything runs on Cloudflare.**
 
+## Live demo
+
+**👉 [cf-ai-amigo.mirmueed000.workers.dev](https://cf-ai-amigo.mirmueed000.workers.dev)**
+
+1. Sign up with Clerk (email or Google, takes a few seconds).
+2. Go to **Agents → Create Agent** and pick a suggestion, e.g. the Hacker News one.
+3. Click **Run Agent**, then open **Chat With Agent** to ask follow-up questions.
+
+Web search, Hacker News, memory, scheduling and chat work without connecting anything. Notion and Slack can be connected from **Integrations**.
+
+> **⚠️ Google (Gmail and Docs) shows an "unverified app" warning**
+>
+> The Google integration is published but **not verified by Google**. Verifying apps that read Gmail requires a paid third-party security assessment and a custom domain, which isn't practical for a demo. So when you connect Google:
+>
+> 1. Google shows **"Google hasn't verified this app"**. Click **Advanced**, then **Go to cf-ai-amigo (unsafe)**.
+> 2. On the permissions screen, **tick every box** (Gmail and Google Docs). The Integrations page warns you if one is missing.
+>
+> Unverified apps are limited by Google to 100 users. Access is only used to run tasks you set up (see the [privacy policy](https://cf-ai-amigo.mirmueed000.workers.dev/privacy)), and you can revoke it any time from your [Google account](https://myaccount.google.com/permissions).
+
+> **Free plan limits:** the demo runs on Cloudflare's free plan (about 10,000 Workers AI neurons a day, roughly 8–10 agent runs shared by all users). If agents stop responding, the daily allowance has run out; it resets every day.
+
 > _"Every weekday at 9am, give me the top 5 Hacker News stories about AI with a one-line summary each."_
 >
 > → Llama 3.3 designs the agent (instructions, tools, schedule `0 9 * * 1-5`), a Durable Object keeps its state, a DO alarm wakes it on schedule, a Workflow executes the run with retries, and the agent writes durable facts into its own SQLite memory so tomorrow's digest doesn't repeat today's.
 
-This is the Cloudflare-native edition of [AMIGO AI](https://github.com/mueed26/AMIGO-AI), my prompt-to-agent platform originally built on Next.js, Gemini, OpenAI Agents SDK, Inngest and Postgres, drizzle, neon, browserbase, composio etc. For this assignment I rebuilt the backend on Cloudflare primitives.
+This is the Cloudflare-native edition of [AMIGO AI](https://github.com/mueed26/AMIGO-AI), my prompt-to-agent platform originally built on Next.js, Gemini, the OpenAI Agents SDK, Inngest, Neon Postgres with Drizzle, Browserbase and Composio. For this assignment I rebuilt the backend on Cloudflare primitives.
 
 ## How it maps to the assignment
 
