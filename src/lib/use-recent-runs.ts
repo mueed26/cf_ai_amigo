@@ -1,5 +1,5 @@
 // Loads recent runs across all agents and reloads when any agent's runs change.
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import { toastError } from "@/lib/format";
 import type { RunWithAgent } from "@/shared";
@@ -26,9 +26,14 @@ export function useRecentRuns(limit = 50) {
     }
   }
 
-  useEffect(() => {
+  const ready = state !== undefined;
+  const reloadOnChange = useEffectEvent(() => {
     reload();
-  }, [changeKey, state !== undefined]);
+  });
+
+  useEffect(() => {
+    reloadOnChange();
+  }, [changeKey, ready]);
 
   return { runs, loading, reload };
 }

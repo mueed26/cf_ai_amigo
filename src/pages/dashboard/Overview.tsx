@@ -30,7 +30,7 @@ export default function Overview() {
   const { state } = useWorkspace();
   const { runs, loading, reload } = useRecentRuns(50);
   const [selected, setSelected] = useState<RunWithAgent | null>(null);
-  const agents = state?.agents ?? [];
+  const agents = useMemo(() => state?.agents ?? [], [state?.agents]);
 
   const data = useMemo(() => {
     const all = runs ?? [];

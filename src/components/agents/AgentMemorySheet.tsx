@@ -1,5 +1,5 @@
 // What an agent remembers between runs, with a button to forget each item.
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { Brain, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,14 +23,21 @@ export default function AgentMemorySheet({
   const { workspace } = useWorkspace();
   const [memories, setMemories] = useState<Memory[] | null>(null);
 
-  useEffect(() => {
-    setMemories(null);
-    if (!agent) return;
+  const agentId = agent?.id;
+  const totalRuns = agent?.totalRuns;
+
+  const load = useEffectEvent((id: string) => {
     workspace.stub
-      .agentMemories(agent.id)
+      .agentMemories(id)
       .then((m) => setMemories(m as Memory[]))
       .catch((e) => toastError(e, "Couldn't load memory"));
-  }, [agent?.id, agent?.totalRuns]);
+  });
+
+  // Reload when a different agent opens or it finishes another run.
+  useEffect(() => {
+    setMemories(null);
+    if (agentId) load(agentId);
+  }, [agentId, totalRuns]);
 
   async function forget(id: number) {
     if (!agent) return;

@@ -1,5 +1,5 @@
 // Edit an agent: look, instructions, schedule, skills, tools and output format.
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { Link } from "react-router";
 import { Loader2, Plus, Shuffle, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -129,11 +129,11 @@ export default function AgentEditSheet({
   const [skill, setSkill] = useState("");
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    setDraft(null);
-    if (!agent) return;
+  const agentId = agent?.id;
+
+  const load = useEffectEvent((id: string) => {
     workspace.stub
-      .getAgentConfig(agent.id)
+      .getAgentConfig(id)
       .then((config) => {
         const c = config as AgentConfig;
         setDraft(c);
@@ -144,7 +144,13 @@ export default function AgentEditSheet({
         toastError(e, "Couldn't load the agent");
         onClose();
       });
-  }, [agent?.id]);
+  });
+
+  // Load the agent's settings each time a different agent opens.
+  useEffect(() => {
+    setDraft(null);
+    if (agentId) load(agentId);
+  }, [agentId]);
 
   const update = <K extends keyof AgentConfig>(key: K, value: AgentConfig[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
