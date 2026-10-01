@@ -266,6 +266,8 @@ export class AmigoAgent extends AIChatAgent<Env, AmigoAgentState> {
         searchApiKey: secrets(this.env).TAVILY_API_KEY
       }),
       stopWhen: stepCountIs(8),
+      // Without this, Workers AI uses a short default and long tool calls get cut off.
+      maxOutputTokens: 2048,
       abortSignal: options?.abortSignal
     });
     return result.toUIMessageStreamResponse();

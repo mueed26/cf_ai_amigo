@@ -6,7 +6,7 @@ import {
   type AgentWorkflowEvent,
   type AgentWorkflowStep
 } from "agents/workflows";
-import { generateText, stepCountIs } from "ai";
+import { generateText, stepCountIs, type ToolSet } from "ai";
 import type { BrowserWorker } from "@cloudflare/puppeteer";
 import { createWorkersAI } from "workers-ai-provider";
 import { cleanAi } from "../lib/ai";
@@ -20,10 +20,14 @@ import {
 import { secrets } from "../lib/integrations/secrets";
 import { missingDestinations, requiredDestinations } from "../lib/delivery";
 import { log } from "../lib/log";
+import { findTextToolCall } from "../lib/salvage";
 import { buildTools } from "../lib/tools";
 import { MODEL, type ToolCallRecord } from "../shared";
 
 type RunParams = { runId: string };
+
+// Long enough for a full report or a tool call with a lot of content.
+const MAX_OUTPUT_TOKENS = 2048;
 
 const LLM_RETRY = {
   retries: { limit: 2, delay: "10 seconds", backoff: "exponential" },
@@ -111,9 +115,11 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
       system,
       prompt,
       tools,
-      stopWhen: stepCountIs(10)
+      stopWhen: stepCountIs(10),
+      // Without this, Workers AI uses a short default and long tool calls get cut off.
+      maxOutputTokens: MAX_OUTPUT_TOKENS
     });
-    let text = result.text.trim();
+    let text = await runTextToolCall(result.text.trim(), tools, toolCalls);
 
     // If the objective asked to save or send the result somewhere and the
     // agent stopped before doing it, remind it once.
@@ -136,10 +142,15 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
             content: `You haven't finished yet: you still need to save or send the result to ${names}. Call the tool for that now, then reply with where it was saved and the link.`
           }
         ],
-        stopWhen: stepCountIs(4)
+        stopWhen: stepCountIs(4),
+        maxOutputTokens: MAX_OUTPUT_TOKENS
       });
-      if (retry.text.trim())
-        text = text ? `${text}\n\n${retry.text.trim()}` : retry.text.trim();
+      const retryText = await runTextToolCall(
+        retry.text.trim(),
+        tools,
+        toolCalls
+      );
+      if (retryText) text = text ? `${text}\n\n${retryText}` : retryText;
       missing = missingDestinations(required, toolCalls);
     }
     // Still not delivered: show it in the run's steps so it isn't "completed".
@@ -198,4 +209,35 @@ export class AgentRunWorkflow extends AgentWorkflow<AmigoAgent, RunParams> {
       .filter((f) => f.length > 2)
       .slice(0, 3);
   }
+}
+
+// If the model wrote a tool call as text instead of calling the tool, run that
+// tool ourselves (it's still traced and recorded) and report what happened.
+async function runTextToolCall(
+  text: string,
+  tools: ToolSet,
+  calls: ToolCallRecord[]
+) {
+  const call = findTextToolCall(text);
+  if (!call) return text;
+  // Already done for real in this run: just drop the leftover JSON
+  // instead of running it again (that would create duplicates).
+  if (calls.some((c) => c.ok && c.tool === call.name)) {
+    return (
+      text.split(call.raw).join("").trim() || `Done: ${call.name} finished.`
+    );
+  }
+  const tool = tools[call.name] as
+    | { execute?: (input: unknown, options: unknown) => Promise<unknown> }
+    | undefined;
+  if (!tool?.execute) return text;
+  const result = await tool.execute(call.args, {
+    toolCallId: `text-${call.name}`,
+    messages: []
+  });
+  const failed = !!result && typeof result === "object" && "error" in result;
+  const details = typeof result === "string" ? result : JSON.stringify(result);
+  return failed
+    ? `Tried ${call.name}, but it failed: ${details.slice(0, 500)}`
+    : `Done: ${call.name} finished.\n\n${details.slice(0, 1500)}`;
 }

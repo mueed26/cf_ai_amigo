@@ -16,6 +16,7 @@ import { secrets } from "../lib/integrations/secrets";
 import { SLACK_BOT_SCOPES, slackApi } from "../lib/integrations/slack";
 import type { Provider } from "../lib/integrations/types";
 import { planAgent } from "../lib/planner";
+import { parseJsonStrings } from "../lib/salvage";
 import { MAX_AGENTS } from "../shared";
 import type {
   AgentConfig,
@@ -446,7 +447,10 @@ export class Workspace extends Agent<Env, WorkspaceState> {
       serverId: server.id,
       name: mcpTool.name,
       // The model often sends emoji icons Notion rejects; pages don't need them.
-      arguments: withoutIcons(args ?? {}) as Record<string, unknown>
+      arguments: withoutIcons(parseJsonStrings(args ?? {})) as Record<
+        string,
+        unknown
+      >
     });
     const content = (result.content ?? []) as { type: string; text?: string }[];
     const text = content
